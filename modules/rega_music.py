@@ -344,12 +344,13 @@ def download_track_sync(track_meta: dict) -> tuple:
             "--no-playlist",
             "-f", "ba/b",
             "-N", "4",
-            "--extractor-args", "youtube:player_client=android",
             "--no-check-certificates",
             "--buffer-size", "1024K",
-            "--output", f"{raw_prefix}.%(ext)s",
-            query
+            "--output", f"{raw_prefix}.%(ext)s"
         ]
+        if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
+            cmd.extend(["--cookies", "cookies.txt"])
+        cmd.extend(["--extractor-args", "youtube:player_client=android,web", query])
         res = subprocess.run(cmd, capture_output=True, timeout=120)
         return res
 
@@ -367,12 +368,13 @@ def download_track_sync(track_meta: dict) -> tuple:
             "--no-playlist",
             "-f", "ba/b",
             "-N", "4",
-            "--extractor-args", "youtube:player_client=android",
             "--no-check-certificates",
             "--buffer-size", "1024K",
-            "--output", f"{raw_prefix}.%(ext)s",
-            query_fallback
+            "--output", f"{raw_prefix}.%(ext)s"
         ]
+        if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
+            cmd.extend(["--cookies", "cookies.txt"])
+        cmd.extend(["--extractor-args", "youtube:player_client=android,web", query_fallback])
         subprocess.run(cmd, capture_output=True, timeout=120)
         candidates = glob.glob(f"{raw_prefix}.*")
 
