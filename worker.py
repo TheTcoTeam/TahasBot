@@ -297,10 +297,7 @@ def main():
     if "youtube.com" in URL or "youtu.be" in URL:
         ydl_meta_opts["js_runtimes"] = {"deno": {}}
         ydl_meta_opts["extractor_args"] = {
-            "youtubepot-bgutilhttp": {
-                "base_url": ["http://127.0.0.1:4416"],
-                "disable_innertube": ["1"]
-            },
+            "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
             "youtube": {"player_client": ["web", "mweb", "android"]}
         }
     elif os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
@@ -368,10 +365,7 @@ def main():
         if "youtube.com" in URL or "youtu.be" in URL:
             sub_opts["js_runtimes"] = {"deno": {}}
             sub_opts["extractor_args"] = {
-                "youtubepot-bgutilhttp": {
-                    "base_url": ["http://127.0.0.1:4416"],
-                    "disable_innertube": ["1"]
-                },
+                "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
                 "youtube": {"player_client": ["web", "mweb", "android"]}
             }
         elif os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
@@ -402,7 +396,7 @@ def main():
     if "youtube.com" in URL or "youtu.be" in URL:
         cmd.extend([
             "--js-runtimes", "deno",
-            "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416;disable_innertube=1",
+            "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
             "--extractor-args", "youtube:player_client=web,mweb,android"
         ])
     elif os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
@@ -456,7 +450,7 @@ def main():
         if "youtube.com" in URL or "youtu.be" in URL:
             fallback_cmd.extend([
                 "--js-runtimes", "deno",
-                "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416;disable_innertube=1",
+                "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
                 "--extractor-args", "youtube:player_client=web,mweb,android"
             ])
         if FORMAT == "mp3" or "audio" in QUALITY:
