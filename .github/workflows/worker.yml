@@ -69,20 +69,22 @@ jobs:
       - name: Install Python Dependencies
         run: |
           pip install --upgrade pip
-          pip install "yt-dlp[default,curl-cffi]" yt-dlp-get-pot requests mutagen urllib3
+          pip install "yt-dlp[default,curl-cffi]" requests mutagen urllib3
 
       - name: Setup YouTube POT Provider & Plugin
         run: |
-          curl -sL https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest/download/bgutil-pot-linux-x86_64 -o /usr/local/bin/bgutil-pot
-          chmod +x /usr/local/bin/bgutil-pot
+          sudo curl -sL https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest/download/bgutil-pot-linux-x86_64 -o /usr/local/bin/bgutil-pot
+          sudo chmod +x /usr/local/bin/bgutil-pot
           /usr/local/bin/bgutil-pot server --host 127.0.0.1 --port 4416 &
+          SITE_DIR=$(python -c "import site; print(site.getsitepackages()[0])")
           curl -sL https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest/download/bgutil-ytdlp-pot-provider-rs.zip -o /tmp/plugin.zip
-          mkdir -p ~/.yt-dlp/plugins
-          unzip -q -o /tmp/plugin.zip -d ~/.yt-dlp/plugins/
-          mkdir -p ./plugins
-          unzip -q -o /tmp/plugin.zip -d ./plugins/
+          unzip -q -o /tmp/plugin.zip -d "$SITE_DIR"
+          unzip -q -o /tmp/plugin.zip -d .
+          mkdir -p ~/.yt-dlp/plugins/bgutil-pot
+          unzip -q -o /tmp/plugin.zip -d ~/.yt-dlp/plugins/bgutil-pot/
           sleep 2
           curl -s http://127.0.0.1:4416/ping || true
+          python -m yt_dlp --version
 
       - name: Execute Worker
         env:

@@ -295,8 +295,10 @@ def main():
         "getcomments": SEND_COMMENTS
     }
     if "youtube.com" in URL or "youtu.be" in URL:
+        ydl_meta_opts["js_runtimes"] = ["deno"]
         ydl_meta_opts["extractor_args"] = {
-            "youtubepot-bgutilhttp": {"base_url": "http://127.0.0.1:4416"}
+            "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
+            "youtube": {"player_client": ["web", "mweb", "tvhtml5", "android"]}
         }
     elif os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
         ydl_meta_opts["cookiefile"] = "cookies.txt"
@@ -361,8 +363,10 @@ def main():
             "outtmpl": os.path.join(WORK_DIR, f"sub_%(id)s.%(ext)s")
         }
         if "youtube.com" in URL or "youtu.be" in URL:
+            sub_opts["js_runtimes"] = ["deno"]
             sub_opts["extractor_args"] = {
-                "youtubepot-bgutilhttp": {"base_url": "http://127.0.0.1:4416"}
+                "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
+                "youtube": {"player_client": ["web", "mweb", "tvhtml5", "android"]}
             }
         elif os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
             sub_opts["cookiefile"] = "cookies.txt"
@@ -392,7 +396,8 @@ def main():
     if "youtube.com" in URL or "youtu.be" in URL:
         cmd.extend([
             "--js-runtimes", "deno",
-            "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
+            "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
+            "--extractor-args", "youtube:player_client=web,mweb,tvhtml5,android,ios"
         ])
     elif os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
         cmd.extend(["--cookies", "cookies.txt"])
@@ -440,7 +445,8 @@ def main():
         if "youtube.com" in URL or "youtu.be" in URL:
             fallback_cmd.extend([
                 "--js-runtimes", "deno",
-                "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
+                "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
+                "--extractor-args", "youtube:player_client=web,mweb,tvhtml5,android,ios"
             ])
         if FORMAT == "mp3" or "audio" in QUALITY:
             fallback_cmd.extend(["-f", "ba/b", "-x", "--audio-format", "mp3"])

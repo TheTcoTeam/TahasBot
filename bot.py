@@ -1786,13 +1786,15 @@ async def on_callback(client: Client, callback_query: CallbackQuery):
 
         status_msg = await client.send_message(chat_id, "⏳ اتصال به سرور دانلود اختصاصی...")
 
+        slice_mb = get_video_slice_limit_mb()
         # Dispatch heavy job to GitHub Actions Runner
         dispatched = dispatch_github_worker(
             chat_id=chat_id,
             message_id=status_msg.id,
             url=target_url,
             fmt=fmt,
-            quality=quality
+            quality=quality,
+            slice_mb=slice_mb
         )
 
         if dispatched:
