@@ -6,6 +6,27 @@ Supports multi-language: Persian (fa), English (en), Russian (ru), Spanish (es).
 
 from balethon.objects import InlineKeyboard, InlineKeyboardButton
 
+# Monkey-patch Balethon InlineKeyboard so both list-of-lists and unpacked arguments serialize to proper 2D array
+_orig_inline_kb_init = InlineKeyboard.__init__
+_orig_add_row = InlineKeyboard.add_row
+
+def _safe_inline_kb_init(self, *rows, **kwargs):
+    if len(rows) == 1 and isinstance(rows[0], (list, tuple)):
+        first_item = rows[0]
+        if first_item and isinstance(first_item[0], (list, tuple)):
+            rows = tuple(first_item)
+        elif not first_item:
+            rows = ()
+    _orig_inline_kb_init(self, *rows, **kwargs)
+
+def _safe_add_row(self, *row, row_index: int = -1):
+    if len(row) == 1 and isinstance(row[0], (list, tuple)):
+        row = tuple(row[0])
+    _orig_add_row(self, *row, row_index=row_index)
+
+InlineKeyboard.__init__ = _safe_inline_kb_init
+InlineKeyboard.add_row = _safe_add_row
+
 def InlineKeyboardMarkup(rows):
     return InlineKeyboard(*rows)
 

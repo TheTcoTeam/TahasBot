@@ -13,6 +13,7 @@ import json
 import asyncio
 import traceback
 import subprocess
+import urllib.parse
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -20,12 +21,34 @@ import aiohttp
 from aiohttp import web
 import requests
 import pymongo
+import yt_dlp
 
 from balethon import Client
 from balethon.objects import (
     InlineKeyboard, InlineKeyboardButton,
     Message, CallbackQuery, Update
 )
+
+# Monkey-patch Balethon InlineKeyboard so both list-of-lists and unpacked arguments serialize to proper 2D array
+_orig_inline_kb_init = InlineKeyboard.__init__
+_orig_add_row = InlineKeyboard.add_row
+
+def _safe_inline_kb_init(self, *rows, **kwargs):
+    if len(rows) == 1 and isinstance(rows[0], (list, tuple)):
+        first_item = rows[0]
+        if first_item and isinstance(first_item[0], (list, tuple)):
+            rows = tuple(first_item)
+        elif not first_item:
+            rows = ()
+    _orig_inline_kb_init(self, *rows, **kwargs)
+
+def _safe_add_row(self, *row, row_index: int = -1):
+    if len(row) == 1 and isinstance(row[0], (list, tuple)):
+        row = tuple(row[0])
+    _orig_add_row(self, *row, row_index=row_index)
+
+InlineKeyboard.__init__ = _safe_inline_kb_init
+InlineKeyboard.add_row = _safe_add_row
 
 
 import modules.menus as menus
@@ -185,9 +208,12 @@ def log_activity(chat_id: int, action: str, details: str = ""):
 async def safe_edit_or_send(client: Client, chat_id: int, msg: Message, text: str, reply_markup=None):
     if msg:
         try:
-            return await msg.edit_text(text, reply_markup=reply_markup)
+            return await msg.edit(text, reply_markup=reply_markup)
         except Exception:
-            pass
+            try:
+                return await msg.edit_text(text, reply_markup=reply_markup)
+            except Exception:
+                pass
     return await client.send_message(chat_id, text, reply_markup=reply_markup)
 
 
@@ -1373,7 +1399,7 @@ async def on_callback(client: Client, callback_query: CallbackQuery):
 
     # --- Submenu Navigation ---
     if data == "menu_youtube":
-        USER_STATES.pop(chat_id, None)
+        USER_STATES[chat_id] = "AWAIT_YT_QUERY"
         text = (
             "▶️ **یوتیوب (YouTube):**\n\n"
             "شما می‌توانید لینک هر ویدیوی یوتیوب را مستقیماً ارسال کنید، یا از طریق دکمه‌های زیر جستجو فرمایید:"
@@ -1995,8 +2021,11 @@ async def on_message(client: Client, message: Message):
         await handle_youtube_channel_search(client, message, text)
         return
 
-    if state in ["AWAIT_YT_KEYWORD_SEARCH", "AWAIT_YT_SEARCH"]:
+    if state in ["AWAIT_YT_QUERY", "AWAIT_YT_KEYWORD_SEARCH", "AWAIT_YT_SEARCH"]:
         USER_STATES.pop(chat_id, None)
+        if "youtube.com" in text or "youtu.be" in text:
+            await render_yt_video_card(client, chat_id, text)
+            return
         await handle_youtube_keyword_search(client, message, text)
         return
 
