@@ -150,6 +150,37 @@ def set_video_slice_limit_mb(mb: int):
             print(f"Error setting video_slice_mb: {e}", flush=True)
 
 
+def is_playlist_locked(platform: str) -> bool:
+    """Check if playlists are locked for spotify, soundcloud, or ytmusic (default True = locked)."""
+    if db is not None:
+        try:
+            doc = db.settings.find_one({"key": f"lock_{platform}_playlists"})
+            if doc and "locked" in doc:
+                return bool(doc["locked"])
+        except Exception:
+            pass
+    return True
+
+
+def set_playlist_lock(platform: str, locked: bool):
+    """Set playlist lock state for a given platform."""
+    if db is not None:
+        try:
+            db.settings.update_one(
+                {"key": f"lock_{platform}_playlists"},
+                {"$set": {"key": f"lock_{platform}_playlists", "locked": bool(locked), "updated_at": int(time.time())}},
+                upsert=True
+            )
+        except Exception as e:
+            print(f"Error setting {platform} playlist lock: {e}", flush=True)
+
+
+def toggle_playlist_lock(platform: str) -> bool:
+    new_val = not is_playlist_locked(platform)
+    set_playlist_lock(platform, new_val)
+    return new_val
+
+
 def is_user_banned(chat_id: int) -> bool:
     if db is not None:
         try:
@@ -481,10 +512,37 @@ async def render_admin_home(client: Client, chat_id: int, msg: Message = None):
     kb = InlineKeyboard([
         [InlineKeyboardButton("📊 آمار و ارقام جامع", "adm_stats"), InlineKeyboardButton("👥 مدیریت کاربران", "adm_users_0_seen")],
         [InlineKeyboardButton("🔍 جستجوی کاربر", "adm_search"), InlineKeyboardButton("📜 جریان زنده فعالیت‌ها", "adm_act_0")],
-        [InlineKeyboardButton(f"✂️ تنظیم سقف تکه‌کردن ویدیو ({slice_limit} MB)", "adm_slice")],
+        [InlineKeyboardButton(f"✂️ سقف تکه‌کردن ({slice_limit} MB)", "adm_slice"), InlineKeyboardButton("🎛 قفل پلی‌لیست‌ها", "adm_locks")],
         [InlineKeyboardButton("📢 ارسال همگانی (Broadcast)", "adm_bc")],
         [InlineKeyboardButton(maint_toggle_btn, "adm_maint")],
         [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]
+    ])
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_admin_locks(client: Client, chat_id: int, msg: Message = None):
+    if not is_admin(chat_id):
+        return
+    sp_l = is_playlist_locked("spotify")
+    sc_l = is_playlist_locked("soundcloud")
+    ytm_l = is_playlist_locked("ytmusic")
+
+    def stat(l): return "🔒 قفل (دانلود و جستجو مسدود)" if l else "🔓 باز (دانلود و جستجو مجاز)"
+    def btn_txt(plat, l): return f"{'🔓 باز کردن' if l else '🔒 قفل کردن'} پلی‌لیست {plat}"
+
+    text = (
+        "🎛 **تنظیمات قفل پلی‌لیست‌ها (Playlist Locks Control):**\n\n"
+        "جهت مدیریت منابع سرور، می‌توانید دانلود پلی‌لیست‌ها را برای هر پلتفرم فعال یا قفل فرمایید:\n\n"
+        f"🟢 **اسپاتیفای (Spotify):** {stat(sp_l)}\n"
+        f"☁️ **ساندکلاد (SoundCloud):** {stat(sc_l)}\n"
+        f"🔴 **یوتیوب موزیک (YouTube Music):** {stat(ytm_l)}\n\n"
+        "روی دکمه پلتفرم مورد نظر جهت تغییر وضعیت کلیک کنید:"
+    )
+    kb = InlineKeyboard([
+        [InlineKeyboardButton(btn_txt("اسپاتیفای", sp_l), "adm_tog_lock_sp")],
+        [InlineKeyboardButton(btn_txt("ساندکلاد", sc_l), "adm_tog_lock_sc")],
+        [InlineKeyboardButton(btn_txt("یوتیوب موزیک", ytm_l), "adm_tog_lock_ytm")],
+        [InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", "adm_home")]
     ])
     await safe_edit_or_send(client, chat_id, msg, text, kb)
 
@@ -1304,6 +1362,745 @@ async def render_yt_extras_screen(client: Client, chat_id: int, msg: Message = N
     await safe_edit_or_send(client, chat_id, msg, text, kb)
 
 
+# ----------------- SPOTIFY MUSIC RENDERERS -----------------
+async def render_spotify_home(client: Client, chat_id: int, msg: Message = None):
+    USER_STATES[chat_id] = "AWAIT_SP_LINK_OR_QUERY"
+    sp_locked = is_playlist_locked("spotify")
+    pl_label = "🔒 پلی‌لیست‌ها (غیرفعال)" if sp_locked else "📑 پلی‌لیست‌ها (Playlists)"
+    text = (
+        "🟢 **اسپاتیفای (Spotify Music):**\n\n"
+        "شما می‌توانید لینک هر آهنگ، آلبوم یا پلی‌لیست اسپاتیفای را ارسال کنید، "
+        "یا از طریق دکمه‌های زیر جستجو فرمایید:"
+    )
+    kb = InlineKeyboard([
+        [
+            InlineKeyboardButton("🎵 جستجوی آهنگ (Tracks)", "sp_search_track"),
+            InlineKeyboardButton("👤 جستجوی خواننده (Artists)", "sp_search_artist")
+        ],
+        [
+            InlineKeyboardButton("💿 جستجوی آلبوم (Albums)", "sp_search_album"),
+            InlineKeyboardButton("🔥 داغ‌ترین‌های هفته (Hottest)", "sp_hottest")
+        ],
+        [InlineKeyboardButton(pl_label, "sp_search_playlist")],
+        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]
+    ])
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_sp_tracks_page(client: Client, chat_id: int, page: int = 0, msg: Message = None):
+    tracks = USER_DATA.get(chat_id, {}).get("sp_track_results", [])
+    query = USER_DATA.get(chat_id, {}).get("sp_track_query", "موزیک")
+    if not tracks:
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            f"❌ نتیجه‌ای برای «{query}» در اسپاتیفای یافت نشد.",
+            InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به اسپاتیفای", "menu_music_spotify")]])
+        )
+        return
+
+    per_page = 5
+    total_pages = max(1, math.ceil(len(tracks) / per_page))
+    page = max(0, min(page, total_pages - 1))
+    start_idx = page * per_page
+    page_tracks = tracks[start_idx:start_idx + per_page]
+
+    text = (
+        f"🟢 **نتایج جستجوی آهنگ در اسپاتیفای:**\n"
+        f"🔍 عبارت: **{query}** | صفحه {page + 1} از {total_pages}\n\n"
+        "برای مشاهده جزییات و کیفیت دانلود، روی آهنگ مورد نظر کلیک کنید:"
+    )
+
+    rows = []
+    for idx, t in enumerate(page_tracks, start=start_idx + 1):
+        dur = rega_music.format_duration(t.get("duration", 0))
+        btn_title = f"▶️ {idx}. {t['title'][:25]} - {t['artist'][:15]} ({dur})"
+        rows.append([InlineKeyboardButton(btn_title, f"sp_show_trk_{t['id']}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ قبلی", f"sp_trk_pg_{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", "sp_noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("بعدی ▶️", f"sp_trk_pg_{page + 1}"))
+    rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("🔙 بازگشت به منوی اسپاتیفای", "menu_music_spotify")])
+    await safe_edit_or_send(client, chat_id, msg, text, InlineKeyboard(rows))
+
+
+async def render_sp_track_card(client: Client, chat_id: int, track_id: str, msg: Message = None):
+    t = rega_music.get_track_info(track_id)
+    if not t:
+        tracks = USER_DATA.get(chat_id, {}).get("sp_track_results", [])
+        for item in tracks:
+            if str(item.get("id")) == str(track_id):
+                t = item
+                break
+    if not t:
+        await safe_edit_or_send(
+            client, chat_id, msg, "❌ اطلاعات آهنگ یافت نشد.",
+            InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت", "sp_trk_pg_0")]])
+        )
+        return
+
+    USER_DATA.setdefault(chat_id, {})["sp_selected_track"] = t
+    dur = rega_music.format_duration(t.get("duration", 0))
+    rel_date = t.get("release_date") or "ثبت‌نشده"
+    album_name = t.get("album") or "تک‌آهنگ (Single)"
+
+    text = (
+        "🎵 **مشخصات ترک صوتی اسپاتیفای:**\n\n"
+        f"🎧 عنوان: **{t['title']}**\n"
+        f"👤 خواننده: **{t['artist']}**\n"
+        f"💿 آلبوم: **{album_name}**\n"
+        f"⏱ مدت زمان: **{dur}**\n"
+        f"📅 تاریخ انتشار: **{rel_date}**\n\n"
+        "کیفیت مورد نظر خود را برای دانلود انتخاب فرمایید:"
+    )
+
+    kb = InlineKeyboard([
+        [
+            InlineKeyboardButton("📥 کیفیت عالی (320 kbps)", f"sp_dl_320_{track_id}"),
+            InlineKeyboardButton("📥 کیفیت خوب (128 kbps)", f"sp_dl_128_{track_id}")
+        ],
+        [InlineKeyboardButton("🔙 بازگشت به نتایج آهنگ‌ها", "sp_trk_pg_curr")]
+    ])
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_sp_albums_page(client: Client, chat_id: int, page: int = 0, msg: Message = None):
+    albums = USER_DATA.get(chat_id, {}).get("sp_album_results", [])
+    query = USER_DATA.get(chat_id, {}).get("sp_album_query", "آلبوم")
+    if not albums:
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            f"❌ آلبومی برای «{query}» در اسپاتیفای یافت نشد.",
+            InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به اسپاتیفای", "menu_music_spotify")]])
+        )
+        return
+
+    per_page = 5
+    total_pages = max(1, math.ceil(len(albums) / per_page))
+    page = max(0, min(page, total_pages - 1))
+    start_idx = page * per_page
+    page_albs = albums[start_idx:start_idx + per_page]
+
+    text = (
+        f"💿 **نتایج جستجوی آلبوم در اسپاتیفای:**\n"
+        f"🔍 عبارت: **{query}** | صفحه {page + 1} از {total_pages}\n\n"
+        "آلبوم مورد نظر را انتخاب کنید:"
+    )
+
+    rows = []
+    for idx, a in enumerate(page_albs, start=start_idx + 1):
+        nb = a.get("nb_tracks", 0)
+        btn_title = f"💿 {idx}. {a['title'][:25]} - {a['artist'][:15]} ({nb} ترک)"
+        rows.append([InlineKeyboardButton(btn_title, f"sp_show_alb_{a['id']}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ قبلی", f"sp_alb_pg_{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", "sp_noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("بعدی ▶️", f"sp_alb_pg_{page + 1}"))
+    rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("🔙 بازگشت به منوی اسپاتیفای", "menu_music_spotify")])
+    await safe_edit_or_send(client, chat_id, msg, text, InlineKeyboard(rows))
+
+
+async def render_sp_album_detail(client: Client, chat_id: int, album_id: str, page: int = 0, msg: Message = None):
+    alb = rega_music.get_album_details(album_id)
+    if not alb:
+        await safe_edit_or_send(
+            client, chat_id, msg, "❌ اطلاعات آلبوم دریافت نشد.",
+            InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت", "sp_alb_pg_0")]])
+        )
+        return
+
+    USER_DATA.setdefault(chat_id, {})["sp_selected_album"] = alb
+    tracks = alb.get("tracks", [])
+    per_page = 6
+    total_pages = max(1, math.ceil(len(tracks) / per_page))
+    page = max(0, min(page, total_pages - 1))
+    start_idx = page * per_page
+    page_trks = tracks[start_idx:start_idx + per_page]
+
+    text = (
+        f"💿 **آلبوم:** {alb['title']}\n"
+        f"👤 **خواننده:** {alb['artist']}\n"
+        f"🎶 **تعداد ترک‌ها:** {alb['nb_tracks']} آهنگ\n"
+        f"📅 **تاریخ انتشار:** {alb.get('release_date', 'ثبت‌نشده')}\n\n"
+        "می‌توانید کل آلبوم را به صورت یکجا دریافت کنید یا هر آهنگ را جداگانه انتخاب نمایید:"
+    )
+
+    rows = [
+        [InlineKeyboardButton(f"📥 دانلود کل آلبوم ({alb['nb_tracks']} ترک - 320k)", f"sp_dl_alb_all_{album_id}")]
+    ]
+
+    for t in page_trks:
+        dur = rega_music.format_duration(t.get("duration", 0))
+        rows.append([InlineKeyboardButton(f"▶️ {t['track_number']}. {t['title']} ({dur})", f"sp_show_trk_{t['id']}")])
+
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀️ قبلی", f"sp_alb_trks_{album_id}_{page - 1}"))
+        nav.append(InlineKeyboardButton(f"صفحه {page + 1}/{total_pages}", "sp_noop"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton("بعدی ▶️", f"sp_alb_trks_{album_id}_{page + 1}"))
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton("🔙 بازگشت به لیست آلبوم‌ها", "sp_alb_pg_curr")])
+    await safe_edit_or_send(client, chat_id, msg, text, InlineKeyboard(rows))
+
+
+async def render_sp_artists_page(client: Client, chat_id: int, page: int = 0, msg: Message = None):
+    artists = USER_DATA.get(chat_id, {}).get("sp_artist_results", [])
+    query = USER_DATA.get(chat_id, {}).get("sp_artist_query", "هنرمند")
+    if not artists:
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            f"❌ هنرمندی برای «{query}» در اسپاتیفای یافت نشد.",
+            InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به اسپاتیفای", "menu_music_spotify")]])
+        )
+        return
+
+    per_page = 5
+    total_pages = max(1, math.ceil(len(artists) / per_page))
+    page = max(0, min(page, total_pages - 1))
+    start_idx = page * per_page
+    page_arts = artists[start_idx:start_idx + per_page]
+
+    text = (
+        f"👤 **نتایج جستجوی خواننده در اسپاتیفای:**\n"
+        f"🔍 عبارت: **{query}** | صفحه {page + 1} از {total_pages}\n\n"
+        "خواننده مورد نظر را انتخاب کنید:"
+    )
+
+    rows = []
+    for idx, art in enumerate(page_arts, start=start_idx + 1):
+        fans = art.get("fans", 0)
+        btn_title = f"👤 {idx}. {art['name'][:25]} ({fans:,} طرفدار)"
+        rows.append([InlineKeyboardButton(btn_title, f"sp_show_art_{art['id']}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ قبلی", f"sp_art_pg_{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", "sp_noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("بعدی ▶️", f"sp_art_pg_{page + 1}"))
+    rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("🔙 بازگشت به منوی اسپاتیفای", "menu_music_spotify")])
+    await safe_edit_or_send(client, chat_id, msg, text, InlineKeyboard(rows))
+
+
+async def render_sp_artist_detail(client: Client, chat_id: int, artist_id: str, msg: Message = None):
+    art = None
+    for a in USER_DATA.get(chat_id, {}).get("sp_artist_results", []):
+        if str(a.get("id")) == str(artist_id):
+            art = a
+            break
+    art_name = art.get("name") if art else "خواننده"
+
+    text = (
+        f"👤 **هنرمند:** {art_name}\n"
+        f"👥 تعداد هواداران: **{art.get('fans', 0):,} نفر**\n\n"
+        "بخش مورد نظر را انتخاب نمایید:"
+    )
+
+    kb = InlineKeyboard([
+        [InlineKeyboardButton("🎵 برترین آهنگ‌های این خواننده", f"sp_art_trks_{artist_id}")],
+        [InlineKeyboardButton("💿 آلبوم‌های رسمی این خواننده", f"sp_art_albs_{artist_id}")],
+        [InlineKeyboardButton("🔙 بازگشت به لیست خوانندگان", "sp_art_pg_curr")]
+    ])
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_sp_playlists_page(client: Client, chat_id: int, page: int = 0, msg: Message = None):
+    pls = USER_DATA.get(chat_id, {}).get("sp_playlist_results", [])
+    query = USER_DATA.get(chat_id, {}).get("sp_playlist_query", "پلی‌لیست")
+    if not pls:
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            f"❌ پلی‌لیستی برای «{query}» یافت نشد.",
+            InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به اسپاتیفای", "menu_music_spotify")]])
+        )
+        return
+
+    per_page = 5
+    total_pages = max(1, math.ceil(len(pls) / per_page))
+    page = max(0, min(page, total_pages - 1))
+    start_idx = page * per_page
+    page_pls = pls[start_idx:start_idx + per_page]
+
+    text = (
+        f"📑 **نتایج جستجوی پلی‌لیست اسپاتیفای:**\n"
+        f"🔍 عبارت: **{query}** | صفحه {page + 1} از {total_pages}\n\n"
+        "پلی‌لیست مورد نظر را انتخاب کنید:"
+    )
+    rows = []
+    for idx, pl in enumerate(page_pls, start=start_idx + 1):
+        nb = pl.get("nb_tracks", 0)
+        btn_title = f"📑 {idx}. {pl['title'][:25]} ({nb} ترک)"
+        rows.append([InlineKeyboardButton(btn_title, f"sp_show_pl_{pl['id']}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ قبلی", f"sp_pl_pg_{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", "sp_noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("بعدی ▶️", f"sp_pl_pg_{page + 1}"))
+    rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("🔙 بازگشت به منوی اسپاتیفای", "menu_music_spotify")])
+    await safe_edit_or_send(client, chat_id, msg, text, InlineKeyboard(rows))
+
+
+async def render_sp_playlist_detail(client: Client, chat_id: int, playlist_id: str, page: int = 0, msg: Message = None):
+    pl = rega_music.get_playlist_details(playlist_id)
+    if not pl:
+        await safe_edit_or_send(
+            client, chat_id, msg, "❌ اطلاعات پلی‌لیست دریافت نشد.",
+            InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت", "sp_pl_pg_0")]])
+        )
+        return
+
+    USER_DATA.setdefault(chat_id, {})["sp_selected_playlist"] = pl
+    tracks = pl.get("tracks", [])
+    per_page = 6
+    total_pages = max(1, math.ceil(len(tracks) / per_page))
+    page = max(0, min(page, total_pages - 1))
+    start_idx = page * per_page
+    page_trks = tracks[start_idx:start_idx + per_page]
+
+    text = (
+        f"📑 **پلی‌لیست:** {pl['title']}\n"
+        f"👤 **سازنده:** {pl['creator']}\n"
+        f"🎶 **تعداد ترک‌ها:** {pl['nb_tracks']} آهنگ\n\n"
+        "می‌توانید کل پلی‌لیست را یکجا دریافت کنید یا هر آهنگ را جداگانه انتخاب نمایید:"
+    )
+
+    rows = [
+        [InlineKeyboardButton(f"📥 دانلود کامل پلی‌لیست ({pl['nb_tracks']} آهنگ - 320k)", f"sp_dl_pl_all_{playlist_id}")]
+    ]
+    for t in page_trks:
+        dur = rega_music.format_duration(t.get("duration", 0))
+        rows.append([InlineKeyboardButton(f"▶️ {t['track_number']}. {t['title']} ({dur})", f"sp_show_trk_{t['id']}")])
+
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀️ قبلی", f"sp_pl_trks_{playlist_id}_{page - 1}"))
+        nav.append(InlineKeyboardButton(f"صفحه {page + 1}/{total_pages}", "sp_noop"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton("بعدی ▶️", f"sp_pl_trks_{playlist_id}_{page + 1}"))
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton("🔙 بازگشت به لیست پلی‌لیست‌ها", "sp_pl_pg_curr")])
+    await safe_edit_or_send(client, chat_id, msg, text, InlineKeyboard(rows))
+
+
+# ----------------- SOUNDCLOUD RENDERERS -----------------
+async def render_sc_home(client: Client, chat_id: int, msg: Message = None):
+    USER_STATES[chat_id] = "AWAIT_SC_LINK_OR_QUERY"
+    sc_locked = is_playlist_locked("soundcloud")
+    pl_label = "🔒 پلی‌لیست‌ها (غیرفعال)" if sc_locked else "📑 پلی‌لیست‌ها (Playlists)"
+    text = (
+        "☁️ **ساندکلاد (SoundCloud):**\n\n"
+        "شما می‌توانید لینک هر آهنگ، ست یا پلی‌لیست از ساندکلاد را ارسال کنید، "
+        "یا از طریق دکمه‌های زیر جستجو فرمایید:"
+    )
+    kb = InlineKeyboard([
+        [
+            InlineKeyboardButton("🎵 جستجوی آهنگ (Tracks)", "sc_search_track"),
+            InlineKeyboardButton("👤 جستجوی هنرمند (Artists)", "sc_search_artist")
+        ],
+        [
+            InlineKeyboardButton("💿 جستجوی آلبوم / ست (Albums)", "sc_search_album"),
+            InlineKeyboardButton("🔥 برترین‌های ساندکلاد (Trending)", "sc_trending")
+        ],
+        [InlineKeyboardButton(pl_label, "sc_search_playlist")],
+        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]
+    ])
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_sc_tracks_page(client: Client, chat_id: int, page: int = 0, msg: Message = None):
+    tracks = USER_DATA.get(chat_id, {}).get("sc_track_results", [])
+    query = USER_DATA.get(chat_id, {}).get("sc_track_query", "موزیک")
+    if not tracks:
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            f"❌ نتیجه‌ای برای «{query}» در ساندکلاد یافت نشد.",
+            InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به ساندکلاد", "menu_music_sc")]])
+        )
+        return
+
+    per_page = 5
+    total_pages = max(1, math.ceil(len(tracks) / per_page))
+    page = max(0, min(page, total_pages - 1))
+    start_idx = page * per_page
+    page_trks = tracks[start_idx:start_idx + per_page]
+
+    text = (
+        f"☁️ **نتایج جستجوی ساندکلاد:**\n"
+        f"🔍 عبارت: **{query}** | صفحه {page + 1} از {total_pages}\n\n"
+        "برای انتخاب کیفیت و دانلود، روی آهنگ مورد نظر کلیک کنید:"
+    )
+
+    rows = []
+    for idx, t in enumerate(page_trks, start=start_idx):
+        dur = rega_music.format_duration(t.get("duration", 0))
+        btn_title = f"▶️ {idx + 1}. {t['title'][:25]} - {t['artist'][:15]} ({dur})"
+        rows.append([InlineKeyboardButton(btn_title, f"sc_show_trk_{idx}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ قبلی", f"sc_trk_pg_{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", "sc_noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("بعدی ▶️", f"sc_trk_pg_{page + 1}"))
+    rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("🔙 بازگشت به منوی ساندکلاد", "menu_music_sc")])
+    await safe_edit_or_send(client, chat_id, msg, text, InlineKeyboard(rows))
+
+
+async def render_sc_track_card(client: Client, chat_id: int, track_idx: int, msg: Message = None):
+    tracks = USER_DATA.get(chat_id, {}).get("sc_track_results", [])
+    if track_idx < 0 or track_idx >= len(tracks):
+        await safe_edit_or_send(
+            client, chat_id, msg, "❌ آهنگ یافت نشد.",
+            InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت", "sc_trk_pg_0")]])
+        )
+        return
+
+    t = tracks[track_idx]
+    USER_DATA.setdefault(chat_id, {})["sc_selected_track"] = t
+    dur = rega_music.format_duration(t.get("duration", 0))
+    views = f"{t.get('views', 0):,} بار" if t.get("views") else "مشخص‌نشده"
+
+    text = (
+        "☁️ **مشخصات ترک ساندکلاد:**\n\n"
+        f"🎧 عنوان: **{t['title']}**\n"
+        f"👤 ناشر / هنرمند: **{t['artist']}**\n"
+        f"⏱ مدت زمان: **{dur}**\n"
+        f"▶️ پخش و بازدید: **{views}**\n\n"
+        "کیفیت مورد نظر خود را برای دانلود انتخاب فرمایید:"
+    )
+
+    kb = InlineKeyboard([
+        [
+            InlineKeyboardButton("📥 کیفیت عالی (320 kbps)", f"sc_dl_320_{track_idx}"),
+            InlineKeyboardButton("📥 کیفیت خوب (128 kbps)", f"sc_dl_128_{track_idx}")
+        ],
+        [InlineKeyboardButton("🔙 بازگشت به نتایج ساندکلاد", "sc_trk_pg_curr")]
+    ])
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_sc_albums_page(client: Client, chat_id: int, page: int = 0, msg: Message = None):
+    albums = USER_DATA.get(chat_id, {}).get("sc_album_results", [])
+    query = USER_DATA.get(chat_id, {}).get("sc_album_query", "آلبوم")
+    if not albums:
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            f"❌ آلبوم یا ستی برای «{query}» در ساندکلاد یافت نشد.",
+            InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به ساندکلاد", "menu_music_sc")]])
+        )
+        return
+
+    per_page = 5
+    total_pages = max(1, math.ceil(len(albums) / per_page))
+    page = max(0, min(page, total_pages - 1))
+    start_idx = page * per_page
+    page_albs = albums[start_idx:start_idx + per_page]
+
+    text = (
+        f"💿 **نتایج جستجوی آلبوم / ست در ساندکلاد:**\n"
+        f"🔍 عبارت: **{query}** | صفحه {page + 1} از {total_pages}\n\n"
+        "آلبوم مورد نظر را انتخاب فرمایید:"
+    )
+    rows = []
+    for idx, a in enumerate(page_albs, start=start_idx):
+        btn_title = f"💿 {idx + 1}. {a['title'][:25]} - {a['artist'][:15]}"
+        rows.append([InlineKeyboardButton(btn_title, f"sc_show_alb_{idx}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ قبلی", f"sc_alb_pg_{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", "sc_noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("بعدی ▶️", f"sc_alb_pg_{page + 1}"))
+    rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("🔙 بازگشت به منوی ساندکلاد", "menu_music_sc")])
+    await safe_edit_or_send(client, chat_id, msg, text, InlineKeyboard(rows))
+
+
+async def render_sc_album_detail(client: Client, chat_id: int, album_idx: int, msg: Message = None):
+    albums = USER_DATA.get(chat_id, {}).get("sc_album_results", [])
+    if album_idx < 0 or album_idx >= len(albums):
+        await safe_edit_or_send(client, chat_id, msg, "❌ آلبوم یافت نشد.", InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت", "sc_alb_pg_0")]]))
+        return
+
+    a = albums[album_idx]
+    USER_DATA.setdefault(chat_id, {})["sc_selected_album"] = a
+    text = (
+        f"💿 **آلبوم / ست ساندکلاد:**\n\n"
+        f"🎧 عنوان: **{a['title']}**\n"
+        f"👤 ناشر: **{a['artist']}**\n\n"
+        "گزینه دانلود مورد نظر را انتخاب فرمایید:"
+    )
+    kb = InlineKeyboard([
+        [
+            InlineKeyboardButton("📥 دانلود (320 kbps)", f"sc_dl_320_{album_idx}"),
+            InlineKeyboardButton("📥 دانلود (128 kbps)", f"sc_dl_128_{album_idx}")
+        ],
+        [InlineKeyboardButton("🔙 بازگشت به لیست آلبوم‌ها", "sc_alb_pg_curr")]
+    ])
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_sc_artists_page(client: Client, chat_id: int, page: int = 0, msg: Message = None):
+    artists = USER_DATA.get(chat_id, {}).get("sc_artist_results", [])
+    query = USER_DATA.get(chat_id, {}).get("sc_artist_query", "هنرمند")
+    if not artists:
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            f"❌ هنرمندی برای «{query}» در ساندکلاد یافت نشد.",
+            InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به ساندکلاد", "menu_music_sc")]])
+        )
+        return
+
+    per_page = 5
+    total_pages = max(1, math.ceil(len(artists) / per_page))
+    page = max(0, min(page, total_pages - 1))
+    start_idx = page * per_page
+    page_arts = artists[start_idx:start_idx + per_page]
+
+    text = (
+        f"👤 **هنرمندان ساندکلاد:**\n"
+        f"🔍 عبارت: **{query}** | صفحه {page + 1} از {total_pages}\n\n"
+        "هنرمند مورد نظر را جهت مشاهده ترک‌ها انتخاب کنید:"
+    )
+    rows = []
+    for idx, art in enumerate(page_arts, start=start_idx):
+        rows.append([InlineKeyboardButton(f"👤 {idx + 1}. {art['name']}", f"sc_art_trks_{idx}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ قبلی", f"sc_art_pg_{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", "sc_noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("بعدی ▶️", f"sc_art_pg_{page + 1}"))
+    rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("🔙 بازگشت به منوی ساندکلاد", "menu_music_sc")])
+    await safe_edit_or_send(client, chat_id, msg, text, InlineKeyboard(rows))
+
+
+# ----------------- YOUTUBE MUSIC RENDERERS -----------------
+async def render_ytm_home(client: Client, chat_id: int, msg: Message = None):
+    USER_STATES[chat_id] = "AWAIT_YTM_LINK_OR_QUERY"
+    ytm_locked = is_playlist_locked("ytmusic")
+    pl_label = "🔒 پلی‌لیست‌ها (غیرفعال)" if ytm_locked else "📑 پلی‌لیست‌ها (Playlists)"
+    text = (
+        "🔴 **یوتیوب موزیک (YouTube Music):**\n\n"
+        "شما می‌توانید لینک هر آهنگ، آلبوم یا پلی‌لیست یوتیوب موزیک را ارسال کنید، "
+        "یا از طریق دکمه‌های زیر جستجو فرمایید:"
+    )
+    kb = InlineKeyboard([
+        [
+            InlineKeyboardButton("🎵 جستجوی آهنگ (Tracks)", "ytm_search_track"),
+            InlineKeyboardButton("👤 جستجوی خواننده (Artists)", "ytm_search_artist")
+        ],
+        [
+            InlineKeyboardButton("💿 جستجوی آلبوم (Albums)", "ytm_search_album"),
+            InlineKeyboardButton("🔥 داغ‌ترین آهنگ‌ها (Top Music)", "ytm_trending")
+        ],
+        [InlineKeyboardButton(pl_label, "ytm_search_playlist")],
+        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]
+    ])
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_ytm_tracks_page(client: Client, chat_id: int, page: int = 0, msg: Message = None):
+    tracks = USER_DATA.get(chat_id, {}).get("ytm_track_results", [])
+    query = USER_DATA.get(chat_id, {}).get("ytm_track_query", "موزیک")
+    if not tracks:
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            f"❌ نتیجه‌ای برای «{query}» در یوتیوب موزیک یافت نشد.",
+            InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به یوتیوب موزیک", "menu_music_ytm")]])
+        )
+        return
+
+    per_page = 5
+    total_pages = max(1, math.ceil(len(tracks) / per_page))
+    page = max(0, min(page, total_pages - 1))
+    start_idx = page * per_page
+    page_trks = tracks[start_idx:start_idx + per_page]
+
+    text = (
+        f"🔴 **نتایج جستجوی یوتیوب موزیک:**\n"
+        f"🔍 عبارت: **{query}** | صفحه {page + 1} از {total_pages}\n\n"
+        "برای انتخاب کیفیت و دانلود، روی آهنگ مورد نظر کلیک کنید:"
+    )
+
+    rows = []
+    for idx, t in enumerate(page_trks, start=start_idx + 1):
+        dur = rega_music.format_duration(t.get("duration", 0))
+        btn_title = f"▶️ {idx}. {t['title'][:25]} - {t['artist'][:15]} ({dur})"
+        rows.append([InlineKeyboardButton(btn_title, f"ytm_show_trk_{t['id']}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ قبلی", f"ytm_trk_pg_{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", "ytm_noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("بعدی ▶️", f"ytm_trk_pg_{page + 1}"))
+    rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("🔙 بازگشت به منوی یوتیوب موزیک", "menu_music_ytm")])
+    await safe_edit_or_send(client, chat_id, msg, text, InlineKeyboard(rows))
+
+
+async def render_ytm_track_card(client: Client, chat_id: int, vid_id: str, msg: Message = None):
+    t = None
+    for item in USER_DATA.get(chat_id, {}).get("ytm_track_results", []):
+        if str(item.get("id")) == str(vid_id):
+            t = item
+            break
+    if not t:
+        t = {"id": vid_id, "title": "YouTube Music Track", "artist": "YouTube Music", "duration": 0, "thumb": f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg"}
+
+    USER_DATA.setdefault(chat_id, {})["ytm_selected_track"] = t
+    dur = rega_music.format_duration(t.get("duration", 0))
+
+    text = (
+        "🔴 **مشخصات ترک صوتی یوتیوب موزیک:**\n\n"
+        f"🎧 عنوان: **{t['title']}**\n"
+        f"👤 کانال / هنرمند: **{t['artist']}**\n"
+        f"⏱ مدت زمان: **{dur}**\n\n"
+        "کیفیت مورد نظر خود را برای دانلود انتخاب فرمایید:"
+    )
+
+    kb = InlineKeyboard([
+        [
+            InlineKeyboardButton("📥 کیفیت عالی (320 kbps)", f"ytm_dl_320_{vid_id}"),
+            InlineKeyboardButton("📥 کیفیت خوب (128 kbps)", f"ytm_dl_128_{vid_id}")
+        ],
+        [InlineKeyboardButton("🔙 بازگشت به نتایج", "ytm_trk_pg_curr")]
+    ])
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_ytm_albums_page(client: Client, chat_id: int, page: int = 0, msg: Message = None):
+    albums = USER_DATA.get(chat_id, {}).get("ytm_album_results", [])
+    query = USER_DATA.get(chat_id, {}).get("ytm_album_query", "آلبوم")
+    if not albums:
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            f"❌ آلبومی برای «{query}» در یوتیوب موزیک یافت نشد.",
+            InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به یوتیوب موزیک", "menu_music_ytm")]])
+        )
+        return
+
+    per_page = 5
+    total_pages = max(1, math.ceil(len(albums) / per_page))
+    page = max(0, min(page, total_pages - 1))
+    start_idx = page * per_page
+    page_albs = albums[start_idx:start_idx + per_page]
+
+    text = (
+        f"💿 **نتایج جستجوی آلبوم در یوتیوب موزیک:**\n"
+        f"🔍 عبارت: **{query}** | صفحه {page + 1} از {total_pages}\n\n"
+        "آلبوم مورد نظر را انتخاب فرمایید:"
+    )
+    rows = []
+    for idx, a in enumerate(page_albs, start=start_idx + 1):
+        btn_title = f"💿 {idx}. {a['title'][:25]} - {a['artist'][:15]}"
+        rows.append([InlineKeyboardButton(btn_title, f"ytm_show_alb_{a['id']}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ قبلی", f"ytm_alb_pg_{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", "ytm_noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("بعدی ▶️", f"ytm_alb_pg_{page + 1}"))
+    rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("🔙 بازگشت به منوی یوتیوب موزیک", "menu_music_ytm")])
+    await safe_edit_or_send(client, chat_id, msg, text, InlineKeyboard(rows))
+
+
+async def render_ytm_album_detail(client: Client, chat_id: int, vid_id: str, msg: Message = None):
+    a = None
+    for item in USER_DATA.get(chat_id, {}).get("ytm_album_results", []):
+        if str(item.get("id")) == str(vid_id):
+            a = item
+            break
+    if not a:
+        a = {"id": vid_id, "title": "YouTube Music Album", "artist": "Artist", "thumb": f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg"}
+
+    USER_DATA.setdefault(chat_id, {})["ytm_selected_album"] = a
+    text = (
+        f"💿 **آلبوم یوتیوب موزیک:**\n\n"
+        f"🎧 عنوان: **{a['title']}**\n"
+        f"👤 کانال / ناشر: **{a['artist']}**\n\n"
+        "گزینه دانلود مورد نظر را انتخاب فرمایید:"
+    )
+    kb = InlineKeyboard([
+        [
+            InlineKeyboardButton("📥 دانلود کامل آلبوم (320 kbps)", f"ytm_dl_320_{vid_id}"),
+            InlineKeyboardButton("📥 دانلود (128 kbps)", f"ytm_dl_128_{vid_id}")
+        ],
+        [InlineKeyboardButton("🔙 بازگشت به لیست آلبوم‌ها", "ytm_alb_pg_curr")]
+    ])
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_ytm_artists_page(client: Client, chat_id: int, page: int = 0, msg: Message = None):
+    artists = USER_DATA.get(chat_id, {}).get("ytm_artist_results", [])
+    query = USER_DATA.get(chat_id, {}).get("ytm_artist_query", "هنرمند")
+    if not artists:
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            f"❌ هنرمندی برای «{query}» در یوتیوب موزیک یافت نشد.",
+            InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به یوتیوب موزیک", "menu_music_ytm")]])
+        )
+        return
+
+    per_page = 5
+    total_pages = max(1, math.ceil(len(artists) / per_page))
+    page = max(0, min(page, total_pages - 1))
+    start_idx = page * per_page
+    page_arts = artists[start_idx:start_idx + per_page]
+
+    text = (
+        f"👤 **هنرمندان یوتیوب موزیک:**\n"
+        f"🔍 عبارت: **{query}** | صفحه {page + 1} از {total_pages}\n\n"
+        "هنرمند مورد نظر را جهت مشاهده ترک‌ها انتخاب فرمایید:"
+    )
+    rows = []
+    for idx, art in enumerate(page_arts, start=start_idx):
+        rows.append([InlineKeyboardButton(f"👤 {idx + 1}. {art['name']}", f"ytm_art_trks_{idx}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ قبلی", f"ytm_art_pg_{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", "ytm_noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("بعدی ▶️", f"ytm_art_pg_{page + 1}"))
+    rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("🔙 بازگشت به منوی یوتیوب موزیک", "menu_music_ytm")])
+    await safe_edit_or_send(client, chat_id, msg, text, InlineKeyboard(rows))
+
+
 # ----------------- CALLBACK QUERY HANDLER -----------------
 @bot.on_callback_query()
 async def on_callback(client: Client, callback_query: CallbackQuery):
@@ -1448,6 +2245,31 @@ async def on_callback(client: Client, callback_query: CallbackQuery):
                 "✂️ **لطفاً سقف حجم هر پارت را به مگابایت (فقط عدد، مثلاً 35) ارسال کنید:**",
                 InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "adm_slice")]])
             )
+            return
+
+        if data == "adm_locks":
+            await render_admin_locks(client, chat_id, msg)
+            return
+
+        if data == "adm_tog_lock_sp":
+            new_v = toggle_playlist_lock("spotify")
+            stat = "قفل 🔒" if new_v else "باز 🔓"
+            await client.send_message(chat_id, f"✅ پلی‌لیست‌های اسپاتیفای اکنون {stat} شدند.")
+            await render_admin_locks(client, chat_id, msg)
+            return
+
+        if data == "adm_tog_lock_sc":
+            new_v = toggle_playlist_lock("soundcloud")
+            stat = "قفل 🔒" if new_v else "باز 🔓"
+            await client.send_message(chat_id, f"✅ پلی‌لیست‌های ساندکلاد اکنون {stat} شدند.")
+            await render_admin_locks(client, chat_id, msg)
+            return
+
+        if data == "adm_tog_lock_ytm":
+            new_v = toggle_playlist_lock("ytmusic")
+            stat = "قفل 🔒" if new_v else "باز 🔓"
+            await client.send_message(chat_id, f"✅ پلی‌لیست‌های یوتیوب موزیک اکنون {stat} شدند.")
+            await render_admin_locks(client, chat_id, msg)
             return
 
         if data == "adm_noop":
@@ -1663,25 +2485,564 @@ async def on_callback(client: Client, callback_query: CallbackQuery):
         await safe_edit_or_send(client, chat_id, msg, text, kb)
         return
 
-    if data in ["menu_music_spotify", "menu_music_sc", "menu_music_ytm"]:
-        text = (
-            "🟢 **مرکز دانلود موزیک:**\n\n"
-            "نام آهنگ یا خواننده را بنویسید، یا لینک آهنگ از اسپاتیفای، دیزر یا ساندکلاد را ارسال کنید."
-        )
-        kb = InlineKeyboard([
-            [InlineKeyboardButton("🔍 جستجوی نام آهنگ", "msearch_prompt")],
-            [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]
-        ])
-        await safe_edit_or_send(client, chat_id, msg, text, kb)
+    # --- Spotify Callbacks ---
+    if data == "menu_music_spotify":
+        await render_spotify_home(client, chat_id, msg)
         return
 
-    if data == "msearch_prompt":
-        USER_STATES[chat_id] = "AWAIT_MUSIC_SEARCH"
+    if data == "sp_search_track":
+        USER_STATES[chat_id] = "AWAIT_SP_TRACK_QUERY"
         await safe_edit_or_send(
             client, chat_id, msg,
-            "🎵 **لطفاً نام آهنگ یا خواننده را ارسال کنید:**",
-            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_main")]])
+            "🎵 **جستجوی آهنگ در اسپاتیفای:**\n\nلطفاً نام آهنگ یا خواننده را بنویسید:",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_music_spotify")]])
         )
+        return
+
+    if data == "sp_search_artist":
+        USER_STATES[chat_id] = "AWAIT_SP_ARTIST_QUERY"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "👤 **جستجوی خواننده در اسپاتیفای:**\n\nلطفاً نام خواننده یا گروه موسیقی را بنویسید:",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_music_spotify")]])
+        )
+        return
+
+    if data == "sp_search_album":
+        USER_STATES[chat_id] = "AWAIT_SP_ALBUM_QUERY"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "💿 **جستجوی آلبوم در اسپاتیفای:**\n\nلطفاً نام آلبوم یا خواننده را بنویسید:",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_music_spotify")]])
+        )
+        return
+
+    if data == "sp_hottest":
+        status_msg = await client.send_message(chat_id, "🔥 در حال دریافت داغ‌ترین‌های این هفته...")
+        tracks = await asyncio.to_thread(rega_music.get_chart_tracks, 25)
+        USER_DATA.setdefault(chat_id, {})["sp_track_results"] = tracks
+        USER_DATA.setdefault(chat_id, {})["sp_track_query"] = "داغ‌ترین‌های هفته (Hottest)"
+        await render_sp_tracks_page(client, chat_id, page=0, msg=status_msg)
+        return
+
+    if data == "sp_search_playlist":
+        if is_playlist_locked("spotify"):
+            await safe_edit_or_send(
+                client, chat_id, msg,
+                "⚠️ **بخش پلی‌لیست در حال حاضر غیرفعال است.**\n\n"
+                "امکان جستجو و دانلود پلی‌لیست‌های اسپاتیفای موقتاً توسط مدیریت قفل شده است.",
+                InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به منوی اسپاتیفای", "menu_music_spotify")]])
+            )
+            return
+        USER_STATES[chat_id] = "AWAIT_SP_PLAYLIST_QUERY"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "📑 **جستجوی پلی‌لیست در اسپاتیفای:**\n\nلطفاً عنوان پلی‌لیست را بنویسید:",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_music_spotify")]])
+        )
+        return
+
+    if data.startswith("sp_trk_pg_"):
+        pg_str = data.replace("sp_trk_pg_", "")
+        pg = int(pg_str) if pg_str.isdigit() else 0
+        await render_sp_tracks_page(client, chat_id, page=pg, msg=msg)
+        return
+
+    if data == "sp_trk_pg_curr":
+        await render_sp_tracks_page(client, chat_id, page=0, msg=msg)
+        return
+
+    if data.startswith("sp_show_trk_"):
+        trk_id = data.replace("sp_show_trk_", "")
+        await render_sp_track_card(client, chat_id, trk_id, msg=msg)
+        return
+
+    if data.startswith("sp_dl_"):
+        # Format: sp_dl_{128|320}_{track_id}
+        parts = data.split("_")
+        if len(parts) >= 4:
+            bitrate_val = parts[2]
+            track_id = parts[3]
+            t = rega_music.get_track_info(track_id)
+            if not t:
+                for item in USER_DATA.get(chat_id, {}).get("sp_track_results", []):
+                    if str(item.get("id")) == str(track_id):
+                        t = item
+                        break
+            if not t:
+                await safe_edit_or_send(client, chat_id, msg, "❌ اطلاعات آهنگ یافت نشد.")
+                return
+
+            status = await client.send_message(chat_id, f"⏳ در حال دانلود ترک با کیفیت {bitrate_val}kbps:\n🎵 **{t['title']}**...")
+            try:
+                audio_f, cover_f = await asyncio.to_thread(rega_music.download_track_sync, t, f"{bitrate_val}k")
+                await status.edit_text("⬆️ در حال ارسال به بله...")
+                dur = int(t.get("duration", 0))
+                with open(audio_f, "rb") as af:
+                    await client.send_audio(
+                        chat_id,
+                        audio=af,
+                        caption=f"🎵 **{t['artist']} - {t['title']}** ({bitrate_val}kbps)\n⚡️ دانلود شده توسط @tahasbot",
+                        title=f"{t['artist']} - {t['title']}",
+                        duration=dur
+                    )
+                await status.delete()
+                log_activity(chat_id, "download_spotify", t["title"])
+                if os.path.exists(audio_f):
+                    os.remove(audio_f)
+                if cover_f and os.path.exists(cover_f):
+                    os.remove(cover_f)
+            except Exception as e:
+                traceback.print_exc()
+                await status.edit_text(f"❌ خطا در دانلود ترک:\n{e}")
+        return
+
+    if data.startswith("sp_alb_pg_"):
+        pg_str = data.replace("sp_alb_pg_", "")
+        pg = int(pg_str) if pg_str.isdigit() else 0
+        await render_sp_albums_page(client, chat_id, page=pg, msg=msg)
+        return
+
+    if data == "sp_alb_pg_curr":
+        await render_sp_albums_page(client, chat_id, page=0, msg=msg)
+        return
+
+    if data.startswith("sp_show_alb_"):
+        alb_id = data.replace("sp_show_alb_", "")
+        await render_sp_album_detail(client, chat_id, alb_id, page=0, msg=msg)
+        return
+
+    if data.startswith("sp_alb_trks_"):
+        parts = data.replace("sp_alb_trks_", "").split("_")
+        alb_id = parts[0]
+        pg = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        await render_sp_album_detail(client, chat_id, alb_id, page=pg, msg=msg)
+        return
+
+    if data.startswith("sp_dl_alb_all_"):
+        alb_id = data.replace("sp_dl_alb_all_", "")
+        alb = rega_music.get_album_details(alb_id)
+        if not alb or not alb.get("tracks"):
+            await safe_edit_or_send(client, chat_id, msg, "❌ ترک‌های این آلبوم یافت نشد.")
+            return
+
+        tracks = alb["tracks"]
+        status = await client.send_message(chat_id, f"📥 دانلود کامل آلبوم **{alb['title']}** آغاز شد ({len(tracks)} آهنگ)...")
+        success_cnt = 0
+        for idx, t in enumerate(tracks, 1):
+            try:
+                await status.edit_text(f"⏳ در حال دانلود و ارسال ترک {idx} از {len(tracks)}:\n🎵 **{t['title']}**...")
+                audio_f, cover_f = await asyncio.to_thread(rega_music.download_track_sync, t, "320k")
+                dur = int(t.get("duration", 0))
+                with open(audio_f, "rb") as af:
+                    await client.send_audio(
+                        chat_id,
+                        audio=af,
+                        caption=f"💿 **آلبوم:** {alb['title']}\n🎵 ترک {idx} از {len(tracks)}: **{t['title']}**\n⚡️ دانلود شده توسط @tahasbot",
+                        title=f"{t.get('artist', alb['artist'])} - {t['title']}",
+                        duration=dur
+                    )
+                success_cnt += 1
+                if os.path.exists(audio_f):
+                    os.remove(audio_f)
+                if cover_f and os.path.exists(cover_f):
+                    os.remove(cover_f)
+                await asyncio.sleep(1.5)
+            except Exception as e:
+                print(f"Error downloading album track {idx}: {e}", flush=True)
+
+        await status.edit_text(f"✅ دانلود کامل آلبوم **{alb['title']}** پایان یافت!\nتعداد کل آهنگ‌های ارسال‌شده: {success_cnt}")
+        log_activity(chat_id, "download_album", alb["title"])
+        return
+
+    if data.startswith("sp_art_pg_"):
+        pg_str = data.replace("sp_art_pg_", "")
+        pg = int(pg_str) if pg_str.isdigit() else 0
+        await render_sp_artists_page(client, chat_id, page=pg, msg=msg)
+        return
+
+    if data == "sp_art_pg_curr":
+        await render_sp_artists_page(client, chat_id, page=0, msg=msg)
+        return
+
+    if data.startswith("sp_show_art_"):
+        art_id = data.replace("sp_show_art_", "")
+        await render_sp_artist_detail(client, chat_id, art_id, msg=msg)
+        return
+
+    if data.startswith("sp_art_trks_"):
+        art_id = data.replace("sp_art_trks_", "")
+        status = await client.send_message(chat_id, "⏳ در حال استخراج برترین آهنگ‌های خواننده...")
+        trks = await asyncio.to_thread(rega_music.get_artist_top_tracks, art_id, 25)
+        USER_DATA.setdefault(chat_id, {})["sp_track_results"] = trks
+        USER_DATA.setdefault(chat_id, {})["sp_track_query"] = "برترین‌های خواننده"
+        await render_sp_tracks_page(client, chat_id, page=0, msg=status)
+        return
+
+    if data.startswith("sp_art_albs_"):
+        art_id = data.replace("sp_art_albs_", "")
+        status = await client.send_message(chat_id, "⏳ در حال استخراج آلبوم‌های خواننده...")
+        albs = await asyncio.to_thread(rega_music.get_artist_albums, art_id, 20)
+        USER_DATA.setdefault(chat_id, {})["sp_album_results"] = albs
+        USER_DATA.setdefault(chat_id, {})["sp_album_query"] = "آلبوم‌های خواننده"
+        await render_sp_albums_page(client, chat_id, page=0, msg=status)
+        return
+
+    if data.startswith("sp_pl_pg_"):
+        pg_str = data.replace("sp_pl_pg_", "")
+        pg = int(pg_str) if pg_str.isdigit() else 0
+        await render_sp_playlists_page(client, chat_id, page=pg, msg=msg)
+        return
+
+    if data == "sp_pl_pg_curr":
+        await render_sp_playlists_page(client, chat_id, page=0, msg=msg)
+        return
+
+    if data.startswith("sp_show_pl_"):
+        pl_id = data.replace("sp_show_pl_", "")
+        await render_sp_playlist_detail(client, chat_id, pl_id, page=0, msg=msg)
+        return
+
+    if data.startswith("sp_pl_trks_"):
+        parts = data.replace("sp_pl_trks_", "").split("_")
+        pl_id = parts[0]
+        pg = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        await render_sp_playlist_detail(client, chat_id, pl_id, page=pg, msg=msg)
+        return
+
+    if data.startswith("sp_dl_pl_all_"):
+        pl_id = data.replace("sp_dl_pl_all_", "")
+        if is_playlist_locked("spotify"):
+            await safe_edit_or_send(client, chat_id, msg, "⚠️ دانلود پلی‌لیست توسط مدیریت قفل شده است.")
+            return
+        pl = rega_music.get_playlist_details(pl_id)
+        if not pl or not pl.get("tracks"):
+            await safe_edit_or_send(client, chat_id, msg, "❌ ترک‌های این پلی‌لیست یافت نشد.")
+            return
+
+        tracks = pl["tracks"]
+        status = await client.send_message(chat_id, f"📥 دانلود کامل پلی‌لیست **{pl['title']}** آغاز شد ({len(tracks)} آهنگ)...")
+        success_cnt = 0
+        for idx, t in enumerate(tracks, 1):
+            try:
+                await status.edit_text(f"⏳ در حال دانلود ترک {idx} از {len(tracks)}:\n🎵 **{t['title']}**...")
+                audio_f, cover_f = await asyncio.to_thread(rega_music.download_track_sync, t, "320k")
+                dur = int(t.get("duration", 0))
+                with open(audio_f, "rb") as af:
+                    await client.send_audio(
+                        chat_id,
+                        audio=af,
+                        caption=f"📑 **پلی‌لیست:** {pl['title']}\n🎵 ترک {idx} از {len(tracks)}: **{t['title']}**\n⚡️ دانلود شده توسط @tahasbot",
+                        title=f"{t.get('artist', 'Artist')} - {t['title']}",
+                        duration=dur
+                    )
+                success_cnt += 1
+                if os.path.exists(audio_f):
+                    os.remove(audio_f)
+                if cover_f and os.path.exists(cover_f):
+                    os.remove(cover_f)
+                await asyncio.sleep(1.5)
+            except Exception as e:
+                print(f"Error downloading playlist track {idx}: {e}", flush=True)
+
+        await status.edit_text(f"✅ دانلود کامل پلی‌لیست **{pl['title']}** پایان یافت!\nتعداد کل آهنگ‌های ارسال‌شده: {success_cnt}")
+        log_activity(chat_id, "download_playlist", pl["title"])
+        return
+
+    # --- SoundCloud Callbacks ---
+    if data == "menu_music_sc":
+        await render_sc_home(client, chat_id, msg)
+        return
+
+    if data == "sc_search_track":
+        USER_STATES[chat_id] = "AWAIT_SC_TRACK_QUERY"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "🎵 **جستجوی آهنگ در ساندکلاد:**\n\nلطفاً نام آهنگ یا خواننده را بنویسید:",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_music_sc")]])
+        )
+        return
+
+    if data == "sc_search_artist":
+        USER_STATES[chat_id] = "AWAIT_SC_ARTIST_QUERY"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "👤 **جستجوی هنرمند در ساندکلاد:**\n\nلطفاً نام هنرمند یا کانال را بنویسید:",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_music_sc")]])
+        )
+        return
+
+    if data == "sc_search_album":
+        USER_STATES[chat_id] = "AWAIT_SC_ALBUM_QUERY"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "💿 **جستجوی آلبوم / ست در ساندکلاد:**\n\nلطفاً نام آلبوم یا ست را بنویسید:",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_music_sc")]])
+        )
+        return
+
+    if data == "sc_trending":
+        status = await client.send_message(chat_id, "🔥 در حال دریافت برترین‌های ساندکلاد...")
+        tracks = await asyncio.to_thread(rega_music.search_soundcloud_tracks, "trending", 20)
+        USER_DATA.setdefault(chat_id, {})["sc_track_results"] = tracks
+        USER_DATA.setdefault(chat_id, {})["sc_track_query"] = "برترین‌های ساندکلاد (Trending)"
+        await render_sc_tracks_page(client, chat_id, page=0, msg=status)
+        return
+
+    if data == "sc_search_playlist":
+        if is_playlist_locked("soundcloud"):
+            await safe_edit_or_send(
+                client, chat_id, msg,
+                "⚠️ **بخش پلی‌لیست در حال حاضر غیرفعال است.**\n\n"
+                "امکان جستجو و دانلود پلی‌لیست‌های ساندکلاد موقتاً توسط مدیریت قفل شده است.",
+                InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به منوی ساندکلاد", "menu_music_sc")]])
+            )
+            return
+        USER_STATES[chat_id] = "AWAIT_SC_PLAYLIST_QUERY"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "📑 **جستجوی پلی‌لیست در ساندکلاد:**\n\nلطفاً عنوان پلی‌لیست را بنویسید:",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_music_sc")]])
+        )
+        return
+
+    if data.startswith("sc_trk_pg_"):
+        pg_str = data.replace("sc_trk_pg_", "")
+        pg = int(pg_str) if pg_str.isdigit() else 0
+        await render_sc_tracks_page(client, chat_id, page=pg, msg=msg)
+        return
+
+    if data == "sc_trk_pg_curr":
+        await render_sc_tracks_page(client, chat_id, page=0, msg=msg)
+        return
+
+    if data.startswith("sc_show_trk_"):
+        idx_str = data.replace("sc_show_trk_", "")
+        idx = int(idx_str) if idx_str.isdigit() else 0
+        await render_sc_track_card(client, chat_id, idx, msg=msg)
+        return
+
+    if data.startswith("sc_dl_"):
+        # Format: sc_dl_{128|320}_{idx}
+        parts = data.split("_")
+        if len(parts) >= 4:
+            bitrate_val = parts[2]
+            idx = int(parts[3]) if parts[3].isdigit() else 0
+            tracks = USER_DATA.get(chat_id, {}).get("sc_track_results", [])
+            if idx < 0 or idx >= len(tracks):
+                await safe_edit_or_send(client, chat_id, msg, "❌ اطلاعات آهنگ یافت نشد.")
+                return
+            t = tracks[idx]
+            status = await client.send_message(chat_id, f"⏳ در حال دانلود از ساندکلاد با کیفیت {bitrate_val}kbps:\n🎵 **{t['title']}**...")
+            try:
+                audio_f, cover_f = await asyncio.to_thread(
+                    rega_music.download_soundcloud_track,
+                    t["url"], t["title"], t["artist"], f"{bitrate_val}k", t.get("thumb")
+                )
+                await status.edit_text("⬆️ در حال ارسال به بله...")
+                dur = int(t.get("duration", 0))
+                with open(audio_f, "rb") as af:
+                    await client.send_audio(
+                        chat_id,
+                        audio=af,
+                        caption=f"☁️ **{t['artist']} - {t['title']}** ({bitrate_val}kbps)\n⚡️ دانلود شده توسط @tahasbot",
+                        title=f"{t['artist']} - {t['title']}",
+                        duration=dur
+                    )
+                await status.delete()
+                log_activity(chat_id, "download_soundcloud", t["title"])
+                if os.path.exists(audio_f):
+                    os.remove(audio_f)
+                if cover_f and os.path.exists(cover_f):
+                    os.remove(cover_f)
+            except Exception as e:
+                traceback.print_exc()
+                await status.edit_text(f"❌ خطا در دانلود ساندکلاد:\n{e}")
+        return
+
+    if data.startswith("sc_alb_pg_"):
+        pg_str = data.replace("sc_alb_pg_", "")
+        pg = int(pg_str) if pg_str.isdigit() else 0
+        await render_sc_albums_page(client, chat_id, page=pg, msg=msg)
+        return
+
+    if data == "sc_alb_pg_curr":
+        await render_sc_albums_page(client, chat_id, page=0, msg=msg)
+        return
+
+    if data.startswith("sc_show_alb_"):
+        idx_str = data.replace("sc_show_alb_", "")
+        idx = int(idx_str) if idx_str.isdigit() else 0
+        await render_sc_album_detail(client, chat_id, idx, msg=msg)
+        return
+
+    if data.startswith("sc_art_pg_"):
+        pg_str = data.replace("sc_art_pg_", "")
+        pg = int(pg_str) if pg_str.isdigit() else 0
+        await render_sc_artists_page(client, chat_id, page=pg, msg=msg)
+        return
+
+    if data.startswith("sc_art_trks_"):
+        idx_str = data.replace("sc_art_trks_", "")
+        idx = int(idx_str) if idx_str.isdigit() else 0
+        artists = USER_DATA.get(chat_id, {}).get("sc_artist_results", [])
+        if 0 <= idx < len(artists):
+            art = artists[idx]
+            status = await client.send_message(chat_id, f"⏳ در حال جستجوی آثار «{art['name']}» در ساندکلاد...")
+            trks = await asyncio.to_thread(rega_music.search_soundcloud_tracks, art["name"], 20)
+            USER_DATA.setdefault(chat_id, {})["sc_track_results"] = trks
+            USER_DATA.setdefault(chat_id, {})["sc_track_query"] = art["name"]
+            await render_sc_tracks_page(client, chat_id, page=0, msg=status)
+        return
+
+    # --- YouTube Music Callbacks ---
+    if data == "menu_music_ytm":
+        await render_ytm_home(client, chat_id, msg)
+        return
+
+    if data == "ytm_search_track":
+        USER_STATES[chat_id] = "AWAIT_YTM_TRACK_QUERY"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "🎵 **جستجوی آهنگ در یوتیوب موزیک:**\n\nلطفاً نام آهنگ یا خواننده را بنویسید:",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_music_ytm")]])
+        )
+        return
+
+    if data == "ytm_search_artist":
+        USER_STATES[chat_id] = "AWAIT_YTM_ARTIST_QUERY"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "👤 **جستجوی خواننده در یوتیوب موزیک:**\n\nلطفاً نام خواننده را بنویسید:",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_music_ytm")]])
+        )
+        return
+
+    if data == "ytm_search_album":
+        USER_STATES[chat_id] = "AWAIT_YTM_ALBUM_QUERY"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "💿 **جستجوی آلبوم در یوتیوب موزیک:**\n\nلطفاً نام آلبوم را بنویسید:",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_music_ytm")]])
+        )
+        return
+
+    if data == "ytm_trending":
+        status = await client.send_message(chat_id, "🔥 در حال دریافت داغ‌ترین‌های یوتیوب موزیک...")
+        tracks = await asyncio.to_thread(rega_music.search_ytm_tracks, "top hits 2026", 20)
+        USER_DATA.setdefault(chat_id, {})["ytm_track_results"] = tracks
+        USER_DATA.setdefault(chat_id, {})["ytm_track_query"] = "داغ‌ترین‌های یوتیوب موزیک (Top Music)"
+        await render_ytm_tracks_page(client, chat_id, page=0, msg=status)
+        return
+
+    if data == "ytm_search_playlist":
+        if is_playlist_locked("ytmusic"):
+            await safe_edit_or_send(
+                client, chat_id, msg,
+                "⚠️ **بخش پلی‌لیست در حال حاضر غیرفعال است.**\n\n"
+                "امکان جستجو و دانلود پلی‌لیست‌های یوتیوب موزیک موقتاً توسط مدیریت قفل شده است.",
+                InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به منوی یوتیوب موزیک", "menu_music_ytm")]])
+            )
+            return
+        USER_STATES[chat_id] = "AWAIT_YTM_PLAYLIST_QUERY"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "📑 **جستجوی پلی‌لیست در یوتیوب موزیک:**\n\nلطفاً عنوان پلی‌لیست را بنویسید:",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_music_ytm")]])
+        )
+        return
+
+    if data.startswith("ytm_trk_pg_"):
+        pg_str = data.replace("ytm_trk_pg_", "")
+        pg = int(pg_str) if pg_str.isdigit() else 0
+        await render_ytm_tracks_page(client, chat_id, page=pg, msg=msg)
+        return
+
+    if data == "ytm_trk_pg_curr":
+        await render_ytm_tracks_page(client, chat_id, page=0, msg=msg)
+        return
+
+    if data.startswith("ytm_show_trk_"):
+        vid_id = data.replace("ytm_show_trk_", "")
+        await render_ytm_track_card(client, chat_id, vid_id, msg=msg)
+        return
+
+    if data.startswith("ytm_dl_"):
+        # Format: ytm_dl_{128|320}_{vid_id}
+        parts = data.split("_")
+        if len(parts) >= 4:
+            bitrate_val = parts[2]
+            vid_id = parts[3]
+            t = None
+            for item in USER_DATA.get(chat_id, {}).get("ytm_track_results", []):
+                if str(item.get("id")) == str(vid_id):
+                    t = item
+                    break
+            if not t:
+                t = {"id": vid_id, "title": "Track", "artist": "YouTube Music", "duration": 0, "thumb": f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg"}
+
+            status = await client.send_message(chat_id, f"⏳ در حال دانلود ترک با کیفیت {bitrate_val}kbps:\n🎵 **{t['title']}**...")
+            try:
+                audio_f, cover_f = await asyncio.to_thread(
+                    rega_music.download_ytm_track,
+                    vid_id, t["title"], t["artist"], f"{bitrate_val}k", t.get("thumb")
+                )
+                await status.edit_text("⬆️ در حال ارسال به بله...")
+                dur = int(t.get("duration", 0))
+                with open(audio_f, "rb") as af:
+                    await client.send_audio(
+                        chat_id,
+                        audio=af,
+                        caption=f"🔴 **{t['artist']} - {t['title']}** ({bitrate_val}kbps)\n⚡️ دانلود شده توسط @tahasbot",
+                        title=f"{t['artist']} - {t['title']}",
+                        duration=dur
+                    )
+                await status.delete()
+                log_activity(chat_id, "download_ytmusic", t["title"])
+                if os.path.exists(audio_f):
+                    os.remove(audio_f)
+                if cover_f and os.path.exists(cover_f):
+                    os.remove(cover_f)
+            except Exception as e:
+                traceback.print_exc()
+                await status.edit_text(f"❌ خطا در دانلود یوتیوب موزیک:\n{e}")
+        return
+
+    if data.startswith("ytm_alb_pg_"):
+        pg_str = data.replace("ytm_alb_pg_", "")
+        pg = int(pg_str) if pg_str.isdigit() else 0
+        await render_ytm_albums_page(client, chat_id, page=pg, msg=msg)
+        return
+
+    if data == "ytm_alb_pg_curr":
+        await render_ytm_albums_page(client, chat_id, page=0, msg=msg)
+        return
+
+    if data.startswith("ytm_show_alb_"):
+        vid_id = data.replace("ytm_show_alb_", "")
+        await render_ytm_album_detail(client, chat_id, vid_id, msg=msg)
+        return
+
+    if data.startswith("ytm_art_pg_"):
+        pg_str = data.replace("ytm_art_pg_", "")
+        pg = int(pg_str) if pg_str.isdigit() else 0
+        await render_ytm_artists_page(client, chat_id, page=pg, msg=msg)
+        return
+
+    if data.startswith("ytm_art_trks_"):
+        idx_str = data.replace("ytm_art_trks_", "")
+        idx = int(idx_str) if idx_str.isdigit() else 0
+        artists = USER_DATA.get(chat_id, {}).get("ytm_artist_results", [])
+        if 0 <= idx < len(artists):
+            art = artists[idx]
+            status = await client.send_message(chat_id, f"⏳ در حال جستجوی آثار «{art['name']}» در یوتیوب موزیک...")
+            trks = await asyncio.to_thread(rega_music.search_ytm_tracks, art["name"], 20)
+            USER_DATA.setdefault(chat_id, {})["ytm_track_results"] = trks
+            USER_DATA.setdefault(chat_id, {})["ytm_track_query"] = art["name"]
+            await render_ytm_tracks_page(client, chat_id, page=0, msg=status)
+        return
+
+    if data in ["sp_noop", "sc_noop", "ytm_noop"]:
         return
 
     if data in ["menu_pinterest", "menu_pexels", "menu_google_images"]:
@@ -2087,6 +3448,126 @@ async def on_message(client: Client, message: Message):
         await handle_youtube_keyword_search(client, message, text)
         return
 
+    # Spotify States
+    if state == "AWAIT_SP_TRACK_QUERY" or (state == "AWAIT_SP_LINK_OR_QUERY" and not text.startswith("http")):
+        USER_STATES.pop(chat_id, None)
+        status = await client.send_message(chat_id, f"🔍 در حال جستجوی «{text}» در اسپاتیفای...")
+        tracks = await asyncio.to_thread(rega_music.search_tracks, text, 25)
+        USER_DATA.setdefault(chat_id, {})["sp_track_results"] = tracks
+        USER_DATA.setdefault(chat_id, {})["sp_track_query"] = text
+        await render_sp_tracks_page(client, chat_id, page=0, msg=status)
+        return
+
+    if state == "AWAIT_SP_ARTIST_QUERY":
+        USER_STATES.pop(chat_id, None)
+        status = await client.send_message(chat_id, f"👤 در حال جستجوی خواننده «{text}» در اسپاتیفای...")
+        artists = await asyncio.to_thread(rega_music.search_artists, text, 20)
+        USER_DATA.setdefault(chat_id, {})["sp_artist_results"] = artists
+        USER_DATA.setdefault(chat_id, {})["sp_artist_query"] = text
+        await render_sp_artists_page(client, chat_id, page=0, msg=status)
+        return
+
+    if state == "AWAIT_SP_ALBUM_QUERY":
+        USER_STATES.pop(chat_id, None)
+        status = await client.send_message(chat_id, f"💿 در حال جستجوی آلبوم «{text}» در اسپاتیفای...")
+        albums = await asyncio.to_thread(rega_music.search_albums, text, 20)
+        USER_DATA.setdefault(chat_id, {})["sp_album_results"] = albums
+        USER_DATA.setdefault(chat_id, {})["sp_album_query"] = text
+        await render_sp_albums_page(client, chat_id, page=0, msg=status)
+        return
+
+    if state == "AWAIT_SP_PLAYLIST_QUERY":
+        USER_STATES.pop(chat_id, None)
+        if is_playlist_locked("spotify"):
+            await client.send_message(chat_id, "⚠️ دانلود و جستجوی پلی‌لیست‌های اسپاتیفای توسط مدیریت قفل شده است.")
+            return
+        status = await client.send_message(chat_id, f"📑 در حال جستجوی پلی‌لیست «{text}» در اسپاتیفای...")
+        pls = await asyncio.to_thread(rega_music.search_playlists, text, 20)
+        USER_DATA.setdefault(chat_id, {})["sp_playlist_results"] = pls
+        USER_DATA.setdefault(chat_id, {})["sp_playlist_query"] = text
+        await render_sp_playlists_page(client, chat_id, page=0, msg=status)
+        return
+
+    # SoundCloud States
+    if state == "AWAIT_SC_TRACK_QUERY" or (state == "AWAIT_SC_LINK_OR_QUERY" and not text.startswith("http")):
+        USER_STATES.pop(chat_id, None)
+        status = await client.send_message(chat_id, f"🔍 در حال جستجوی «{text}» در ساندکلاد...")
+        tracks = await asyncio.to_thread(rega_music.search_soundcloud_tracks, text, 20)
+        USER_DATA.setdefault(chat_id, {})["sc_track_results"] = tracks
+        USER_DATA.setdefault(chat_id, {})["sc_track_query"] = text
+        await render_sc_tracks_page(client, chat_id, page=0, msg=status)
+        return
+
+    if state == "AWAIT_SC_ARTIST_QUERY":
+        USER_STATES.pop(chat_id, None)
+        status = await client.send_message(chat_id, f"👤 در حال جستجوی هنرمند «{text}» در ساندکلاد...")
+        artists = await asyncio.to_thread(rega_music.search_soundcloud_artists, text, 15)
+        USER_DATA.setdefault(chat_id, {})["sc_artist_results"] = artists
+        USER_DATA.setdefault(chat_id, {})["sc_artist_query"] = text
+        await render_sc_artists_page(client, chat_id, page=0, msg=status)
+        return
+
+    if state == "AWAIT_SC_ALBUM_QUERY":
+        USER_STATES.pop(chat_id, None)
+        status = await client.send_message(chat_id, f"💿 در حال جستجوی آلبوم / ست «{text}» در ساندکلاد...")
+        albums = await asyncio.to_thread(rega_music.search_soundcloud_albums, text, 15)
+        USER_DATA.setdefault(chat_id, {})["sc_album_results"] = albums
+        USER_DATA.setdefault(chat_id, {})["sc_album_query"] = text
+        await render_sc_albums_page(client, chat_id, page=0, msg=status)
+        return
+
+    if state == "AWAIT_SC_PLAYLIST_QUERY":
+        USER_STATES.pop(chat_id, None)
+        if is_playlist_locked("soundcloud"):
+            await client.send_message(chat_id, "⚠️ دانلود و جستجوی پلی‌لیست‌های ساندکلاد توسط مدیریت قفل شده است.")
+            return
+        status = await client.send_message(chat_id, f"📑 در حال جستجوی پلی‌لیست «{text}» در ساندکلاد...")
+        albums = await asyncio.to_thread(rega_music.search_soundcloud_playlists, text, 15)
+        USER_DATA.setdefault(chat_id, {})["sc_album_results"] = albums
+        USER_DATA.setdefault(chat_id, {})["sc_album_query"] = text
+        await render_sc_albums_page(client, chat_id, page=0, msg=status)
+        return
+
+    # YouTube Music States
+    if state == "AWAIT_YTM_TRACK_QUERY" or (state == "AWAIT_YTM_LINK_OR_QUERY" and not text.startswith("http")):
+        USER_STATES.pop(chat_id, None)
+        status = await client.send_message(chat_id, f"🔍 در حال جستجوی «{text}» در یوتیوب موزیک...")
+        tracks = await asyncio.to_thread(rega_music.search_ytm_tracks, text, 20)
+        USER_DATA.setdefault(chat_id, {})["ytm_track_results"] = tracks
+        USER_DATA.setdefault(chat_id, {})["ytm_track_query"] = text
+        await render_ytm_tracks_page(client, chat_id, page=0, msg=status)
+        return
+
+    if state == "AWAIT_YTM_ARTIST_QUERY":
+        USER_STATES.pop(chat_id, None)
+        status = await client.send_message(chat_id, f"👤 در حال جستجوی خواننده «{text}» در یوتیوب موزیک...")
+        artists = await asyncio.to_thread(rega_music.search_ytm_artists, text, 15)
+        USER_DATA.setdefault(chat_id, {})["ytm_artist_results"] = artists
+        USER_DATA.setdefault(chat_id, {})["ytm_artist_query"] = text
+        await render_ytm_artists_page(client, chat_id, page=0, msg=status)
+        return
+
+    if state == "AWAIT_YTM_ALBUM_QUERY":
+        USER_STATES.pop(chat_id, None)
+        status = await client.send_message(chat_id, f"💿 در حال جستجوی آلبوم «{text}» در یوتیوب موزیک...")
+        albums = await asyncio.to_thread(rega_music.search_ytm_albums, text, 15)
+        USER_DATA.setdefault(chat_id, {})["ytm_album_results"] = albums
+        USER_DATA.setdefault(chat_id, {})["ytm_album_query"] = text
+        await render_ytm_albums_page(client, chat_id, page=0, msg=status)
+        return
+
+    if state == "AWAIT_YTM_PLAYLIST_QUERY":
+        USER_STATES.pop(chat_id, None)
+        if is_playlist_locked("ytmusic"):
+            await client.send_message(chat_id, "⚠️ دانلود و جستجوی پلی‌لیست‌های یوتیوب موزیک توسط مدیریت قفل شده است.")
+            return
+        status = await client.send_message(chat_id, f"📑 در حال جستجوی پلی‌لیست «{text}» در یوتیوب موزیک...")
+        albums = await asyncio.to_thread(rega_music.search_ytm_playlists, text, 15)
+        USER_DATA.setdefault(chat_id, {})["ytm_album_results"] = albums
+        USER_DATA.setdefault(chat_id, {})["ytm_album_query"] = text
+        await render_ytm_albums_page(client, chat_id, page=0, msg=status)
+        return
+
     if state == "AWAIT_AI_QUERY":
         USER_STATES.pop(chat_id, None)
         status_msg = await client.send_message(chat_id, "🤖 در حال پردازش توسط هوش مصنوعی...")
@@ -2118,13 +3599,34 @@ async def on_message(client: Client, message: Message):
     # 4. Check for URL patterns
     # --- YouTube URL (Direct link triggers interactive Video Card with format & quality selection) ---
     if "youtube.com" in text or "youtu.be" in text:
+        if "music.youtube.com" in text:
+            if "list=" in text:
+                if is_playlist_locked("ytmusic"):
+                    await client.send_message(chat_id, "⚠️ دانلود پلی‌لیست‌های یوتیوب موزیک توسط مدیریت قفل شده است.")
+                    return
+            await render_yt_video_card(client, chat_id, text)
+            return
         await render_yt_video_card(client, chat_id, text)
         return
 
     # --- Spotify URL ---
     if "open.spotify.com" in text:
-        await handle_spotify_link(client, message, text)
-        return
+        if "/album/" in text:
+            m = re.search(r"album/([a-zA-Z0-9]+)", text)
+            alb_id = m.group(1) if m else text
+            await render_sp_album_detail(client, chat_id, alb_id)
+            return
+        elif "/playlist/" in text:
+            if is_playlist_locked("spotify"):
+                await client.send_message(chat_id, "⚠️ دانلود پلی‌لیست‌های اسپاتیفای توسط مدیریت قفل شده است.")
+                return
+            m = re.search(r"playlist/([a-zA-Z0-9]+)", text)
+            pl_id = m.group(1) if m else text
+            await render_sp_playlist_detail(client, chat_id, pl_id)
+            return
+        else:
+            await handle_spotify_link(client, message, text)
+            return
 
     # --- Deezer URL ---
     if "deezer.com" in text:
@@ -2147,8 +3649,22 @@ async def on_message(client: Client, message: Message):
 
     # --- SoundCloud URL ---
     if "soundcloud.com" in text:
-        await handle_social_media_download(client, message, text, platform="SoundCloud")
-        return
+        if "/sets/" in text or "/playlists/" in text:
+            if is_playlist_locked("soundcloud"):
+                await client.send_message(chat_id, "⚠️ دانلود پلی‌لیست‌های ساندکلاد توسط مدیریت قفل شده است.")
+                return
+            await handle_social_media_download(client, message, text, platform="SoundCloud")
+            return
+        else:
+            # Check if direct track can open quality card
+            status = await client.send_message(chat_id, "⏳ در حال بررسی آهنگ از ساندکلاد...")
+            t_list = await asyncio.to_thread(rega_music.search_soundcloud_tracks, text, 1)
+            if t_list:
+                USER_DATA.setdefault(chat_id, {})["sc_track_results"] = t_list
+                await render_sc_track_card(client, chat_id, 0, msg=status)
+            else:
+                await handle_social_media_download(client, message, text, platform="SoundCloud")
+            return
 
     # --- Pinterest URL ---
     if "pinterest.com" in text or "pin.it" in text:
