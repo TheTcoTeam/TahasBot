@@ -101,6 +101,32 @@ def set_maintenance_mode(enabled: bool):
             pass
 
 
+def get_video_slice_limit_mb() -> int:
+    """Returns the maximum chunk size in MB for video slicing (default 25 MB)."""
+    if db is not None:
+        try:
+            doc = db.settings.find_one({"key": "video_slice_mb"})
+            if doc and "value" in doc:
+                return int(doc["value"])
+        except Exception as e:
+            print(f"Error fetching video_slice_mb: {e}", flush=True)
+    return 25
+
+
+def set_video_slice_limit_mb(mb: int):
+    """Sets the maximum chunk size in MB for video slicing."""
+    if db is not None:
+        try:
+            db.settings.update_one(
+                {"key": "video_slice_mb"},
+                {"$set": {"value": int(mb), "updated_at": int(time.time())}},
+                upsert=True
+            )
+            print(f"Updated video_slice_mb to {mb} MB", flush=True)
+        except Exception as e:
+            print(f"Error setting video_slice_mb: {e}", flush=True)
+
+
 def is_user_banned(chat_id: int) -> bool:
     if db is not None:
         try:
@@ -170,7 +196,18 @@ bot = Client(BALE_BOT_TOKEN, time_out=60)
 
 
 # ----------------- GITHUB ACTIONS WORKER DISPATCHER -----------------
-def dispatch_github_worker(chat_id: int, message_id: int, url: str, fmt: str = "mp4", quality: str = "720p") -> bool:
+def dispatch_github_worker(
+    chat_id: int,
+    message_id: int,
+    url: str,
+    fmt: str = "mp4",
+    quality: str = "720p",
+    slice_mb: int = 25,
+    subtitles: bool = False,
+    thumbnail: bool = False,
+    description: bool = False,
+    comments: bool = False
+) -> bool:
     """Trigger GitHub Actions workflow to execute heavy download on 7GB runner."""
     if not GITHUB_TOKEN or not GITHUB_REPO:
         return False
@@ -187,11 +224,16 @@ def dispatch_github_worker(chat_id: int, message_id: int, url: str, fmt: str = "
                 "chat_id": str(chat_id),
                 "message_id": str(message_id),
                 "format": fmt,
-                "quality": quality
+                "quality": quality,
+                "slice_mb": str(slice_mb),
+                "subtitles": "true" if subtitles else "false",
+                "thumbnail": "true" if thumbnail else "false",
+                "description": "true" if description else "false",
+                "comments": "true" if comments else "false"
             }
         }
         res = requests.post(api_url, headers=headers, json=payload, timeout=10)
-        print(f"GitHub workflow dispatch response: {res.status_code}", flush=True)
+        print(f"GitHub workflow dispatch response: {res.status_code} {res.text}", flush=True)
         return res.status_code in [200, 204]
     except Exception as e:
         print(f"Error dispatching GitHub workflow: {e}", flush=True)
@@ -398,9 +440,12 @@ async def render_admin_home(client: Client, chat_id: int, msg: Message = None):
         except Exception:
             pass
 
+    slice_limit = get_video_slice_limit_mb()
+
     text = (
         "🛠 **پنل مدیریت پیشرفته طه (Admin Panel)**\n\n"
         f"🚦 **وضعیت ربات:** {maint_status}\n"
+        f"✂️ سقف برش ویدیوی یوتیوب: **{slice_limit} مگابایت**\n"
         f"👥 کل کاربران: **{total_users}** نفر\n"
         f"🟢 کاربران ۲۴ ساعت گذشته: **{active_24h}** نفر\n"
         f"⬇️ کل دانلودها: **{total_dls}** فایل\n\n"
@@ -410,9 +455,38 @@ async def render_admin_home(client: Client, chat_id: int, msg: Message = None):
     kb = InlineKeyboard([
         [InlineKeyboardButton("📊 آمار و ارقام جامع", "adm_stats"), InlineKeyboardButton("👥 مدیریت کاربران", "adm_users_0_seen")],
         [InlineKeyboardButton("🔍 جستجوی کاربر", "adm_search"), InlineKeyboardButton("📜 جریان زنده فعالیت‌ها", "adm_act_0")],
+        [InlineKeyboardButton(f"✂️ تنظیم سقف تکه‌کردن ویدیو ({slice_limit} MB)", "adm_slice")],
         [InlineKeyboardButton("📢 ارسال همگانی (Broadcast)", "adm_bc")],
         [InlineKeyboardButton(maint_toggle_btn, "adm_maint")],
         [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]
+    ])
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_admin_slice(client: Client, chat_id: int, msg: Message = None):
+    if not is_admin(chat_id):
+        return
+    current_limit = get_video_slice_limit_mb()
+    text = (
+        "✂️ **تنظیم هوشمند محدودیت برش و تکه‌کردن ویدیو (Video Slicing Limit):**\n\n"
+        f"📏 سقف حجم فعلی ارسال در بله: **{current_limit} مگابایت**\n\n"
+        "ویدیوهای یوتیوب بزرگتر از این حجم به صورت خودکار به پارت‌های منظم (`[عنوان] Part 001`, `Part 002`, ...) "
+        "بدون افت کیفیت تقسیم و ارسال خواهند شد.\n\n"
+        "یکی از مقادیر پیش‌فرض را انتخاب کنید یا مقدار سفارشی وارد نمایید:"
+    )
+    kb = InlineKeyboard([
+        [
+            InlineKeyboardButton("15 MB", "adm_set_slice_15"),
+            InlineKeyboardButton("20 MB", "adm_set_slice_20"),
+            InlineKeyboardButton("25 MB (پیش‌فرض)", "adm_set_slice_25")
+        ],
+        [
+            InlineKeyboardButton("30 MB", "adm_set_slice_30"),
+            InlineKeyboardButton("40 MB", "adm_set_slice_40"),
+            InlineKeyboardButton("48 MB", "adm_set_slice_48")
+        ],
+        [InlineKeyboardButton("✏️ وارد کردن حجم دلخواه (مگابایت)", "adm_slice_custom")],
+        [InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", "adm_home")]
     ])
     await safe_edit_or_send(client, chat_id, msg, text, kb)
 
@@ -627,6 +701,527 @@ async def render_admin_activities(client: Client, chat_id: int, page: int = 0, m
     await safe_edit_or_send(client, chat_id, msg, text, kb)
 
 
+# ----------------- YOUTUBE HELPERS & INTERACTIVE WIZARD -----------------
+def format_duration(seconds: int) -> str:
+    if not seconds:
+        return "00:00"
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+
+def calculate_yt_sizes(info: dict) -> dict:
+    """Calculates estimated sizes for standard video and audio qualities in MB."""
+    duration = info.get("duration") or 0
+    formats = info.get("formats", [])
+
+    audio_formats = [f for f in formats if f.get("vcodec") == "none" and f.get("acodec") != "none"]
+    best_audio = max(audio_formats, key=lambda f: f.get("abr") or 0) if audio_formats else None
+    audio_size = 0
+    if best_audio:
+        audio_size = best_audio.get("filesize") or best_audio.get("filesize_approx") or 0
+    if not audio_size and duration:
+        audio_size = int((128 * 1000 / 8) * duration)
+
+    sizes = {}
+    for h in [1080, 720, 480, 360, 240]:
+        v_fmts = [f for f in formats if f.get("vcodec") != "none" and f.get("height") and f.get("height") <= h]
+        best_v = max(v_fmts, key=lambda f: (f.get("height") or 0, f.get("tbr") or 0)) if v_fmts else None
+        if best_v:
+            v_size = best_v.get("filesize") or best_v.get("filesize_approx") or 0
+            if not v_size and best_v.get("tbr") and duration:
+                v_size = int((best_v["tbr"] * 1000 / 8) * duration)
+            tot_size = v_size + (audio_size if best_v.get("acodec") == "none" else 0)
+            sizes[f"{h}p"] = round(tot_size / (1024 * 1024), 1)
+        else:
+            bitrates = {1080: 3500, 720: 1800, 480: 900, 360: 500, 240: 300}
+            if duration:
+                tot_bytes = ((bitrates[h] + 128) * 1000 / 8) * duration
+                sizes[f"{h}p"] = round(tot_bytes / (1024 * 1024), 1)
+            else:
+                sizes[f"{h}p"] = 15.0
+
+    if duration:
+        sizes["320k"] = round(((320 * 1000 / 8) * duration) / (1024 * 1024), 1)
+        sizes["128k"] = round(((128 * 1000 / 8) * duration) / (1024 * 1024), 1)
+    else:
+        sizes["320k"] = 8.5
+        sizes["128k"] = 3.4
+
+    return sizes
+
+
+def search_youtube_channels(query: str, max_results: int = 15) -> list:
+    """Search YouTube channels using YouTube search with sp=EgIQAg%3D%3D."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
+    url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(query)}&sp=EgIQAg%3D%3D"
+    channels = []
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        m = re.search(r'var ytInitialData = ({.*?});</script>', r.text)
+        if not m:
+            m = re.search(r'ytInitialData = ({.*?});</script>', r.text)
+        if m:
+            data = json.loads(m.group(1))
+            contents = data.get("contents", {}).get("twoColumnSearchResultsRenderer", {}).get("primaryContents", {}).get("sectionListRenderer", {}).get("contents", [])
+            for sec in contents:
+                for it in sec.get("itemSectionRenderer", {}).get("contents", []):
+                    ch = it.get("channelRenderer")
+                    if ch:
+                        ch_id = ch.get("channelId")
+                        title = ch.get("title", {}).get("simpleText")
+                        sub_text = ch.get("subscriberCountText", {}).get("simpleText")
+                        if not sub_text and ch.get("videoCountText"):
+                            sub_text = ch.get("videoCountText", {}).get("simpleText")
+                        thumbs = ch.get("thumbnail", {}).get("thumbnails", [])
+                        avatar = thumbs[-1].get("url") if thumbs else ""
+                        if avatar.startswith("//"):
+                            avatar = "https:" + avatar
+                        if ch_id and title:
+                            channels.append({
+                                "id": ch_id,
+                                "title": title,
+                                "subs": sub_text or "تعداد دنبال‌کنندگان نامشخص",
+                                "avatar": avatar
+                            })
+                            if len(channels) >= max_results:
+                                break
+    except Exception as e:
+        print(f"Channel search error: {e}", flush=True)
+    return channels
+
+
+def search_youtube_videos(query: str, max_results: int = 25) -> list:
+    """Search YouTube videos using yt-dlp flat extraction."""
+    ydl_opts = {
+        "quiet": True,
+        "skip_download": True,
+        "extract_flat": True,
+        "extractor_args": {"youtube": {"player_client": ["android"]}}
+    }
+    videos = []
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            res = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
+            for e in res.get("entries", []):
+                v_id = e.get("id")
+                title = e.get("title")
+                dur = e.get("duration") or 0
+                uploader = e.get("uploader") or e.get("channel") or "YouTube"
+                views = e.get("view_count") or 0
+                if v_id and title:
+                    videos.append({
+                        "id": v_id,
+                        "title": title,
+                        "duration": dur,
+                        "duration_str": format_duration(dur),
+                        "uploader": uploader,
+                        "views": views
+                    })
+    except Exception as e:
+        print(f"Video search error: {e}", flush=True)
+    return videos
+
+
+def fetch_channel_latest_videos(channel_id: str, max_results: int = 8) -> list:
+    ydl_opts = {
+        "quiet": True,
+        "skip_download": True,
+        "extract_flat": True,
+        "playlist_items": f"1-{max_results}",
+        "extractor_args": {"youtube": {"player_client": ["android"]}}
+    }
+    videos = []
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            res = ydl.extract_info(f"https://www.youtube.com/channel/{channel_id}/videos", download=False)
+            for e in res.get("entries", []):
+                v_id = e.get("id")
+                title = e.get("title")
+                dur = e.get("duration") or 0
+                if v_id and title:
+                    videos.append({
+                        "id": v_id,
+                        "title": title,
+                        "duration": dur,
+                        "duration_str": format_duration(dur)
+                    })
+    except Exception as e:
+        print(f"Channel videos error: {e}", flush=True)
+    return videos
+
+
+def fetch_video_details(video_url_or_id: str) -> dict:
+    if not video_url_or_id.startswith("http"):
+        video_url = f"https://www.youtube.com/watch?v={video_url_or_id}"
+    else:
+        video_url = video_url_or_id
+
+    ydl_opts = {
+        "quiet": True,
+        "skip_download": True,
+        "extractor_args": {"youtube": {"player_client": ["android"]}}
+    }
+    if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
+        ydl_opts["cookiefile"] = "cookies.txt"
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(video_url, download=False)
+        sizes = calculate_yt_sizes(info)
+        v_id = info.get("id") or ""
+        return {
+            "url": f"https://www.youtube.com/watch?v={v_id}" if v_id else video_url,
+            "video_id": v_id,
+            "title": info.get("title") or "YouTube Video",
+            "uploader": info.get("uploader") or info.get("channel") or "YouTube",
+            "duration": info.get("duration") or 0,
+            "duration_str": format_duration(info.get("duration") or 0),
+            "views": info.get("view_count") or 0,
+            "thumbnail": info.get("thumbnail") or "",
+            "description": (info.get("description") or "").strip()[:500],
+            "sizes": sizes
+        }
+
+
+async def render_yt_channels_page(client: Client, chat_id: int, page: int = 0, msg: Message = None):
+    data = USER_DATA.get(chat_id, {})
+    channels = data.get("yt_channels", [])
+    query = data.get("yt_ch_query", "")
+
+    if not channels:
+        text = f"❌ کانالی برای «{query}» در یوتیوب یافت نشد."
+        kb = InlineKeyboard([[InlineKeyboardButton("🔙 منوی یوتیوب", "menu_youtube")]])
+        await safe_edit_or_send(client, chat_id, msg, text, kb)
+        return
+
+    PAGE_SIZE = 5
+    total_pages = max(1, (len(channels) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    start_idx = page * PAGE_SIZE
+    chunk = channels[start_idx : start_idx + PAGE_SIZE]
+
+    text = (
+        f"👤 **کانال‌های یوتیوب برای «{query}»** (صفحه {page + 1} از {total_pages}):\n\n"
+        "کانال مورد نظر خود را انتخاب کنید:"
+    )
+
+    btn_rows = []
+    for idx_in_chunk, ch in enumerate(chunk):
+        real_idx = start_idx + idx_in_chunk
+        t = ch.get("title", "کانال")[:25]
+        s = ch.get("subs", "")
+        btn_rows.append([InlineKeyboardButton(f"👤 {t} ({s})", f"yt_ch_sel_{real_idx}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ قبلی", f"yt_ch_pg_{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"· {page + 1} / {total_pages} ·", "adm_noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("بعدی ▶️", f"yt_ch_pg_{page + 1}"))
+    btn_rows.append(nav_row)
+    btn_rows.append([InlineKeyboardButton("🔙 بازگشت به منوی یوتیوب", "menu_youtube")])
+
+    kb = InlineKeyboard(btn_rows)
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_yt_channel_detail(client: Client, chat_id: int, channel_idx: int, msg: Message = None):
+    data = USER_DATA.get(chat_id, {})
+    channels = data.get("yt_channels", [])
+    if channel_idx < 0 or channel_idx >= len(channels):
+        await render_yt_channels_page(client, chat_id, 0, msg)
+        return
+
+    ch = channels[channel_idx]
+    ch_id = ch["id"]
+    ch_title = ch["title"]
+    ch_subs = ch["subs"]
+    avatar_url = ch.get("avatar")
+
+    status_msg = await safe_edit_or_send(client, chat_id, msg, f"⏳ در حال بارگذاری ویدیوهای کانال **{ch_title}**...")
+
+    vids = await asyncio.to_thread(fetch_channel_latest_videos, ch_id, 8)
+    USER_DATA.setdefault(chat_id, {})["yt_ch_videos"] = vids
+
+    caption = (
+        f"👤 **کانال یوتیوب: {ch_title}**\n"
+        f"👥 مشترکین: **{ch_subs}**\n\n"
+        "🎬 **جدیدترین ویدیوهای کانال:**\n"
+        "برای انتخاب و دریافت، روی ویدیوی مورد نظر کلیک کنید:"
+    )
+
+    btn_rows = []
+    for v in vids:
+        v_title = v.get("title", "")[:32]
+        d_str = v.get("duration_str", "")
+        btn_rows.append([InlineKeyboardButton(f"🎬 {v_title}... ({d_str})", f"yt_vid_{v['id']}")])
+
+    btn_rows.append([InlineKeyboardButton("🔙 بازگشت به لیست کانال‌ها", "yt_ch_back")])
+    btn_rows.append([InlineKeyboardButton("🔙 منوی یوتیوب", "menu_youtube")])
+    kb = InlineKeyboard(btn_rows)
+
+    sent_photo = False
+    if avatar_url:
+        try:
+            r = await asyncio.to_thread(requests.get, avatar_url, timeout=6)
+            if r.status_code == 200:
+                tmp_p = os.path.join(MEDIA_DIR, f"ch_{chat_id}_{int(time.time())}.jpg")
+                with open(tmp_p, "wb") as f:
+                    f.write(r.content)
+                with open(tmp_p, "rb") as f:
+                    await client.send_photo(chat_id, photo=f, caption=caption, reply_markup=kb)
+                sent_photo = True
+                if status_msg:
+                    await status_msg.delete()
+                if os.path.exists(tmp_p):
+                    os.remove(tmp_p)
+        except Exception as e:
+            print(f"Channel photo error: {e}", flush=True)
+
+    if not sent_photo:
+        await safe_edit_or_send(client, chat_id, status_msg, caption, kb)
+
+
+async def render_yt_keyword_page(client: Client, chat_id: int, page: int = 0, msg: Message = None):
+    data = USER_DATA.get(chat_id, {})
+    raw_results = data.get("yt_kw_results", [])
+    query = data.get("yt_kw_query", "")
+    filters = data.get("yt_kw_filters", {"dur": "all", "sort": "rel"})
+
+    if not raw_results:
+        text = f"❌ ویدیویی برای «{query}» در یوتیوب یافت نشد."
+        kb = InlineKeyboard([[InlineKeyboardButton("🔙 منوی یوتیوب", "menu_youtube")]])
+        await safe_edit_or_send(client, chat_id, msg, text, kb)
+        return
+
+    dur_f = filters.get("dur", "all")
+    filtered = []
+    for v in raw_results:
+        dur = v.get("duration", 0)
+        if dur_f == "short" and dur >= 240:
+            continue
+        elif dur_f == "med" and not (240 <= dur <= 1200):
+            continue
+        elif dur_f == "long" and dur <= 1200:
+            continue
+        filtered.append(v)
+
+    sort_f = filters.get("sort", "rel")
+    if sort_f == "views":
+        filtered.sort(key=lambda x: x.get("views", 0), reverse=True)
+    elif sort_f == "dur":
+        filtered.sort(key=lambda x: x.get("duration", 0), reverse=True)
+
+    if not filtered:
+        text = "❌ نتیجه‌ای با فیلترهای انتخابی یافت نشد.\nمی‌توانید فیلترها را ریست کنید:"
+        kb = InlineKeyboard([
+            [InlineKeyboardButton("🔄 ریست فیلترها", "yt_filt_dur_all")],
+            [InlineKeyboardButton("🔙 منوی یوتیوب", "menu_youtube")]
+        ])
+        await safe_edit_or_send(client, chat_id, msg, text, kb)
+        return
+
+    PAGE_SIZE = 5
+    total_pages = max(1, (len(filtered) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    start_idx = page * PAGE_SIZE
+    chunk = filtered[start_idx : start_idx + PAGE_SIZE]
+
+    dur_labels = {"all": "همه", "short": "کوتاه (<4m)", "med": "متوسط (4-20m)", "long": "طولانی (>20m)"}
+    sort_labels = {"rel": "مرتبط‌ترین", "views": "پربازدیدترین", "dur": "طولانی‌ترین"}
+
+    text = (
+        f"🔍 **نتایج جستجوی یوتیوب: «{query}»**\n"
+        f"📄 صفحه {page + 1} از {total_pages} (کل: {len(filtered)} ویدیو)\n"
+        f"⏱ فیلتر زمان: **{dur_labels.get(dur_f, dur_f)}** | مرتب‌سازی: **{sort_labels.get(sort_f, sort_f)}**\n\n"
+        "ویدیوی مورد نظر خود را برای دانلود انتخاب کنید:"
+    )
+
+    btn_rows = []
+    for idx_in_chunk, v in enumerate(chunk):
+        real_num = start_idx + idx_in_chunk + 1
+        t = v.get("title", "")[:30]
+        d = v.get("duration_str", "")
+        btn_rows.append([InlineKeyboardButton(f"{real_num}️⃣ {t}... ({d})", f"yt_vid_{v['id']}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ قبلی", f"yt_kw_pg_{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"· {page + 1} / {total_pages} ·", "adm_noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("بعدی ▶️", f"yt_kw_pg_{page + 1}"))
+    btn_rows.append(nav_row)
+
+    btn_rows.append([InlineKeyboardButton("⚙️ فیلترها (مدت زمان و مرتب‌سازی)", "yt_kw_filters_menu")])
+    btn_rows.append([InlineKeyboardButton("🔙 منوی یوتیوب", "menu_youtube")])
+
+    kb = InlineKeyboard(btn_rows)
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_yt_video_card(client: Client, chat_id: int, video_url_or_id: str, msg: Message = None):
+    status_msg = await safe_edit_or_send(client, chat_id, msg, "⏳ در حال دریافت مشخصات ویدیو و محاسبه حجم کیفیت‌ها...")
+
+    try:
+        info = await asyncio.to_thread(fetch_video_details, video_url_or_id)
+    except Exception as e:
+        await safe_edit_or_send(client, chat_id, status_msg, f"❌ خطا در استخراج اطلاعات ویدیو: {e}")
+        return
+
+    USER_DATA.setdefault(chat_id, {})["yt_pending"] = {
+        "url": info["url"],
+        "video_id": info["video_id"],
+        "title": info["title"],
+        "uploader": info["uploader"],
+        "duration": info["duration"],
+        "duration_str": info["duration_str"],
+        "views": info["views"],
+        "thumbnail": info["thumbnail"],
+        "description": info["description"],
+        "sizes": info["sizes"],
+        "format": "mp4",
+        "quality": "720p",
+        "extras": {
+            "subtitles": False,
+            "thumbnail": False,
+            "description": False,
+            "comments": False
+        }
+    }
+
+    views_str = f"{info['views']:,}" if info['views'] else "نامشخص"
+    caption = (
+        f"🎬 **{info['title']}**\n\n"
+        f"👤 کانال: **{info['uploader']}**\n"
+        f"⏱ مدت زمان: **{info['duration_str']}**\n"
+        f"👁 تعداد بازدید: **{views_str}**\n\n"
+        "لطفاً نوع فرمت مورد نظر خود را انتخاب کنید:"
+    )
+
+    kb = InlineKeyboard([
+        [
+            InlineKeyboardButton("🎬 دانلود ویدیو (MP4)", "yt_choose_mp4"),
+            InlineKeyboardButton("🎵 استخراج صوت (MP3)", "yt_choose_mp3")
+        ],
+        [InlineKeyboardButton("❌ انصراف", "menu_youtube")]
+    ])
+
+    sent_photo = False
+    thumb_url = info.get("thumbnail")
+    if thumb_url:
+        try:
+            r = await asyncio.to_thread(requests.get, thumb_url, timeout=6)
+            if r.status_code == 200:
+                tmp_p = os.path.join(MEDIA_DIR, f"yt_thumb_{chat_id}_{int(time.time())}.jpg")
+                with open(tmp_p, "wb") as f:
+                    f.write(r.content)
+                with open(tmp_p, "rb") as f:
+                    await client.send_photo(chat_id, photo=f, caption=caption, reply_markup=kb)
+                sent_photo = True
+                if status_msg:
+                    await status_msg.delete()
+                if os.path.exists(tmp_p):
+                    os.remove(tmp_p)
+        except Exception as e:
+            print(f"Thumbnail card error: {e}", flush=True)
+
+    if not sent_photo:
+        await safe_edit_or_send(client, chat_id, status_msg, caption, kb)
+
+
+async def render_yt_quality_selector(client: Client, chat_id: int, msg: Message = None):
+    pending = USER_DATA.get(chat_id, {}).get("yt_pending", {})
+    if not pending:
+        await safe_edit_or_send(client, chat_id, msg, "❌ درخواست منقضی شده است.", InlineKeyboard([[InlineKeyboardButton("🔙 منوی یوتیوب", "menu_youtube")]]))
+        return
+
+    fmt = pending.get("format", "mp4")
+    title = pending.get("title", "ویدیو")
+    sizes = pending.get("sizes", {})
+
+    if fmt == "mp4":
+        text = (
+            f"🎬 **انتخاب کیفیت ویدیوی MP4:**\n\n"
+            f"📌 عنوان: **{title}**\n\n"
+            "کیفیت مورد نظر را بر اساس حجم تخمینی انتخاب کنید:"
+        )
+        s_1080 = sizes.get("1080p", "70")
+        s_720 = sizes.get("720p", "45")
+        s_480 = sizes.get("480p", "25")
+        s_360 = sizes.get("360p", "15")
+        s_240 = sizes.get("240p", "8")
+
+        kb = InlineKeyboard([
+            [InlineKeyboardButton(f"1080p FHD (~{s_1080} MB)", "yt_set_qual_1080p")],
+            [InlineKeyboardButton(f"720p HD (~{s_720} MB)", "yt_set_qual_720p")],
+            [InlineKeyboardButton(f"480p SD (~{s_480} MB)", "yt_set_qual_480p")],
+            [InlineKeyboardButton(f"360p (~{s_360} MB)", "yt_set_qual_360p"), InlineKeyboardButton(f"240p (~{s_240} MB)", "yt_set_qual_240p")],
+            [InlineKeyboardButton("🔙 بازگشت به انتخاب فرمت", "yt_card_back")]
+        ])
+    else:
+        text = (
+            f"🎵 **انتخاب کیفیت فایل صوتی MP3:**\n\n"
+            f"📌 عنوان: **{title}**\n\n"
+            "کیفیت صوتی مورد نظر را انتخاب کنید:"
+        )
+        s_320 = sizes.get("320k", "12")
+        s_128 = sizes.get("128k", "5")
+
+        kb = InlineKeyboard([
+            [InlineKeyboardButton(f"320kbps بالاترین کیفیت (~{s_320} MB)", "yt_set_qual_320k")],
+            [InlineKeyboardButton(f"128kbps کیفیت استاندارد (~{s_128} MB)", "yt_set_qual_128k")],
+            [InlineKeyboardButton("🔙 بازگشت به انتخاب فرمت", "yt_card_back")]
+        ])
+
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_yt_extras_screen(client: Client, chat_id: int, msg: Message = None):
+    pending = USER_DATA.get(chat_id, {}).get("yt_pending", {})
+    if not pending:
+        await safe_edit_or_send(client, chat_id, msg, "❌ درخواست منقضی شده است.", InlineKeyboard([[InlineKeyboardButton("🔙 منوی یوتیوب", "menu_youtube")]]))
+        return
+
+    fmt = pending.get("format", "mp4")
+    qual = pending.get("quality", "720p")
+    title = pending.get("title", "رسانه")
+    extras = pending.get("extras", {})
+    sizes = pending.get("sizes", {})
+    est_sz = sizes.get(qual, sizes.get("720p" if fmt == "mp4" else "320k", "نامشخص"))
+    slice_mb = get_video_slice_limit_mb()
+
+    text = (
+        f"⚙️ **تنظیمات و پیوست‌های دانلودی:**\n\n"
+        f"🎬 اثر: **{title}**\n"
+        f"🎯 فرمت: **{fmt.upper()}** | کیفیت: **{qual}** (~{est_sz} MB)\n"
+        f"✂️ سقف هر پارت ارسال در بله: **{slice_mb} مگابایت**\n\n"
+        "موارد دلخواه را با کلیک روی آنها فعال یا غیرفعال کنید:\n"
+        "*(پیوست‌های انتخاب‌شده قبل از فایل اصلی برای شما ارسال خواهند شد)*"
+    )
+
+    sub_chk = "✅" if extras.get("subtitles") else "❌"
+    thumb_chk = "✅" if extras.get("thumbnail") else "❌"
+    desc_chk = "✅" if extras.get("description") else "❌"
+    comm_chk = "✅" if extras.get("comments") else "❌"
+
+    kb = InlineKeyboard([
+        [InlineKeyboardButton(f"{sub_chk} 📝 دریافت زیرنویس (Subtitle)", "yt_tog_sub")],
+        [InlineKeyboardButton(f"{thumb_chk} 🖼 تصویر کاور اصلی با کیفیت بالا", "yt_tog_thumb")],
+        [InlineKeyboardButton(f"{desc_chk} 📄 توضیحات کامل ویدیو (Description)", "yt_tog_desc")],
+        [InlineKeyboardButton(f"{comm_chk} 💬 برترین نظرات کاربران (Comments)", "yt_tog_comm")],
+        [InlineKeyboardButton("🚀 تأیید نهایی و شروع دانلود", "yt_confirm_dl")],
+        [InlineKeyboardButton("🔙 تغییر کیفیت", f"yt_choose_{fmt}")],
+        [InlineKeyboardButton("❌ انصراف", "menu_youtube")]
+    ])
+
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
 # ----------------- CALLBACK QUERY HANDLER -----------------
 @bot.on_callback_query()
 async def on_callback(client: Client, callback_query: CallbackQuery):
@@ -752,35 +1347,215 @@ async def on_callback(client: Client, callback_query: CallbackQuery):
             await render_admin_activities(client, chat_id, page=page, msg=msg)
             return
 
+        if data == "adm_slice":
+            await render_admin_slice(client, chat_id, msg)
+            return
+
+        if data.startswith("adm_set_slice_"):
+            val_str = data.replace("adm_set_slice_", "")
+            if val_str.isdigit():
+                set_video_slice_limit_mb(int(val_str))
+                await client.send_message(chat_id, f"✅ سقف تکه‌کردن ویدیوها با موفقیت روی {val_str} مگابایت تنظیم شد.")
+            await render_admin_slice(client, chat_id, msg)
+            return
+
+        if data == "adm_slice_custom":
+            USER_STATES[chat_id] = "AWAIT_ADMIN_SLICE_VAL"
+            await safe_edit_or_send(
+                client, chat_id, msg,
+                "✂️ **لطفاً سقف حجم هر پارت را به مگابایت (فقط عدد، مثلاً 35) ارسال کنید:**",
+                InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "adm_slice")]])
+            )
+            return
+
         if data == "adm_noop":
             return
 
     # --- Submenu Navigation ---
     if data == "menu_youtube":
+        USER_STATES.pop(chat_id, None)
         text = (
-            "▶️ **دانلود از یوتیوب:**\n\n"
-            "شما می‌توانید لینک هر ویدیو یوتیوب را مستقیماً بفرستید، یا روی دکمه زیر کلیک کرده و نام ویدیو را برای جستجو تایپ کنید."
+            "▶️ **یوتیوب (YouTube):**\n\n"
+            "شما می‌توانید لینک هر ویدیوی یوتیوب را مستقیماً ارسال کنید، یا از طریق دکمه‌های زیر جستجو فرمایید:"
         )
         kb = InlineKeyboard([
-            [InlineKeyboardButton("🔍 جستجوی ویدیو در یوتیوب", "yt_search_menu")],
+            [InlineKeyboardButton("🔍 جستجو با کلمه کلیدی (Keyword)", "yt_search_kw")],
+            [InlineKeyboardButton("👤 جستجو در کانال‌ها (Channel)", "yt_search_ch")],
             [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]
         ])
         await safe_edit_or_send(client, chat_id, msg, text, kb)
         return
 
-    if data == "yt_search_menu":
-        USER_STATES[chat_id] = "AWAIT_YT_SEARCH"
+    if data == "yt_search_kw":
+        USER_STATES[chat_id] = "AWAIT_YT_KEYWORD_SEARCH"
         await safe_edit_or_send(
             client, chat_id, msg,
-            "🔍 **نام ویدیو یا کلمه کلیدی مورد نظر را ارسال کنید:**",
+            "🔍 **جستجوی ویدیو در یوتیوب:**\n\nلطفاً کلمه کلیدی یا عنوان ویدیو را ارسال کنید:",
             InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_youtube")]])
         )
         return
 
-    if data == "menu_ig_tiktok":
+    if data == "yt_search_ch":
+        USER_STATES[chat_id] = "AWAIT_YT_CHANNEL_SEARCH"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "👤 **جستجو در کانال‌های یوتیوب:**\n\nلطفاً نام یا شناسه کانال یوتیوب را ارسال کنید:",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_youtube")]])
+        )
+        return
+
+    if data.startswith("yt_ch_pg_"):
+        pg_str = data.replace("yt_ch_pg_", "")
+        pg = int(pg_str) if pg_str.isdigit() else 0
+        await render_yt_channels_page(client, chat_id, page=pg, msg=msg)
+        return
+
+    if data.startswith("yt_ch_sel_"):
+        idx_str = data.replace("yt_ch_sel_", "")
+        idx = int(idx_str) if idx_str.isdigit() else 0
+        await render_yt_channel_detail(client, chat_id, channel_idx=idx, msg=msg)
+        return
+
+    if data == "yt_ch_back":
+        await render_yt_channels_page(client, chat_id, page=0, msg=msg)
+        return
+
+    if data.startswith("yt_kw_pg_"):
+        pg_str = data.replace("yt_kw_pg_", "")
+        pg = int(pg_str) if pg_str.isdigit() else 0
+        await render_yt_keyword_page(client, chat_id, page=pg, msg=msg)
+        return
+
+    if data == "yt_kw_filters_menu":
+        filters = USER_DATA.get(chat_id, {}).get("yt_kw_filters", {"dur": "all", "sort": "rel"})
+        dur_f = filters.get("dur", "all")
+        sort_f = filters.get("sort", "rel")
         text = (
-            "📸 **اینستاگرام و تیک‌تاک:**\n\n"
-            "کافیست لینک ریلز، پست یا ویدیوی تیک‌تاک را مستقیماً برای ربات ارسال کنید تا بلافاصله دانلود و برای شما ارسال شود."
+            "⚙️ **فیلترها و مرتب‌سازی نتایج جستجو:**\n\n"
+            "فیلتر مدت زمان یا نوع چینش نتایج را انتخاب کنید:"
+        )
+        def d_mark(k): return "🔘 " if dur_f == k else "⚪️ "
+        def s_mark(k): return "🔘 " if sort_f == k else "⚪️ "
+
+        kb = InlineKeyboard([
+            [
+                InlineKeyboardButton(f"{d_mark('all')}همه زمان‌ها", "yt_filt_dur_all"),
+                InlineKeyboardButton(f"{d_mark('short')}کوتاه (<4m)", "yt_filt_dur_short")
+            ],
+            [
+                InlineKeyboardButton(f"{d_mark('med')}متوسط (4-20m)", "yt_filt_dur_med"),
+                InlineKeyboardButton(f"{d_mark('long')}طولانی (>20m)", "yt_filt_dur_long")
+            ],
+            [
+                InlineKeyboardButton(f"{s_mark('rel')}مرتبط‌ترین", "yt_filt_sort_rel"),
+                InlineKeyboardButton(f"{s_mark('views')}پربازدیدترین", "yt_filt_sort_views"),
+                InlineKeyboardButton(f"{s_mark('dur')}طولانی‌ترین", "yt_filt_sort_dur")
+            ],
+            [InlineKeyboardButton("✅ اعمال و بازگشت به نتایج", "yt_kw_pg_0")]
+        ])
+        await safe_edit_or_send(client, chat_id, msg, text, kb)
+        return
+
+    if data.startswith("yt_filt_dur_"):
+        val = data.replace("yt_filt_dur_", "")
+        USER_DATA.setdefault(chat_id, {}).setdefault("yt_kw_filters", {})["dur"] = val
+        fake_q = CallbackQuery(id="0", message=msg, data="yt_kw_filters_menu", author=query.author)
+        await on_callback(client, fake_q)
+        return
+
+    if data.startswith("yt_filt_sort_"):
+        val = data.replace("yt_filt_sort_", "")
+        USER_DATA.setdefault(chat_id, {}).setdefault("yt_kw_filters", {})["sort"] = val
+        fake_q = CallbackQuery(id="0", message=msg, data="yt_kw_filters_menu", author=query.author)
+        await on_callback(client, fake_q)
+        return
+
+    if data.startswith("yt_vid_"):
+        vid = data.replace("yt_vid_", "")
+        await render_yt_video_card(client, chat_id, vid, msg=msg)
+        return
+
+    if data == "yt_choose_mp4":
+        USER_DATA.setdefault(chat_id, {}).setdefault("yt_pending", {})["format"] = "mp4"
+        await render_yt_quality_selector(client, chat_id, msg=msg)
+        return
+
+    if data == "yt_choose_mp3":
+        USER_DATA.setdefault(chat_id, {}).setdefault("yt_pending", {})["format"] = "mp3"
+        await render_yt_quality_selector(client, chat_id, msg=msg)
+        return
+
+    if data.startswith("yt_set_qual_"):
+        qual = data.replace("yt_set_qual_", "")
+        USER_DATA.setdefault(chat_id, {}).setdefault("yt_pending", {})["quality"] = qual
+        await render_yt_extras_screen(client, chat_id, msg=msg)
+        return
+
+    if data == "yt_card_back":
+        pending = USER_DATA.get(chat_id, {}).get("yt_pending", {})
+        vid = pending.get("video_id") or pending.get("url")
+        if vid:
+            await render_yt_video_card(client, chat_id, vid, msg=msg)
+        else:
+            await on_callback(client, CallbackQuery(id="0", message=msg, data="menu_youtube", author=query.author))
+        return
+
+    if data.startswith("yt_tog_"):
+        key_map = {"yt_tog_sub": "subtitles", "yt_tog_thumb": "thumbnail", "yt_tog_desc": "description", "yt_tog_comm": "comments"}
+        field = key_map.get(data)
+        if field:
+            pending = USER_DATA.setdefault(chat_id, {}).setdefault("yt_pending", {})
+            extras = pending.setdefault("extras", {"subtitles": False, "thumbnail": False, "description": False, "comments": False})
+            extras[field] = not extras.get(field, False)
+            await render_yt_extras_screen(client, chat_id, msg=msg)
+        return
+
+    if data == "yt_confirm_dl":
+        pending = USER_DATA.get(chat_id, {}).get("yt_pending", {})
+        if not pending:
+            await safe_edit_or_send(client, chat_id, msg, "❌ درخواست منقضی شده است.", InlineKeyboard([[InlineKeyboardButton("🔙 منوی یوتیوب", "menu_youtube")]]))
+            return
+
+        slice_mb = get_video_slice_limit_mb()
+        title = pending.get("title", "یوتیوب")
+        fmt = pending.get("format", "mp4")
+        qual = pending.get("quality", "720p")
+        url = pending.get("url")
+        extras = pending.get("extras", {})
+
+        progress_msg = await client.send_message(
+            chat_id,
+            f"🚀 **درخواست دانلود شما با موفقیت ثبت شد!**\n\n"
+            f"🎬 عنوان: **{title}**\n"
+            f"🎯 کیفیت: **{qual}** ({fmt.upper()})\n"
+            f"✂️ سقف هر پارت: **{slice_mb} مگابایت**\n\n"
+            f"⏳ در حال راه‌اندازی سرور اختصاصی و دانلود در پس‌زمینه..."
+        )
+
+        ok = dispatch_github_worker(
+            chat_id=chat_id,
+            message_id=progress_msg.id,
+            url=url,
+            fmt=fmt,
+            quality=qual,
+            slice_mb=slice_mb,
+            subtitles=extras.get("subtitles", False),
+            thumbnail=extras.get("thumbnail", False),
+            description=extras.get("description", False),
+            comments=extras.get("comments", False)
+        )
+
+        if ok:
+            log_activity(chat_id, "youtube_download", url)
+        else:
+            await progress_msg.edit_text("❌ خطا در ارسال درخواست به سرور پردازش. لطفاً لحظاتی دیگر تلاش فرمایید.")
+        return
+
+    if data == "menu_ig_tiktok":
+        USER_STATES[chat_id] = "AWAIT_IG_TIKTOK_LINK"
+        text = (
+            "📸 **دانلود از اینستاگرام و تیک‌تاک:**\n\n"
+            "لطفاً لینک ریلز، پست یا ویدیوی اینستاگرام یا تیک‌تاک را ارسال کنید تا بلافاصله دانلود و برای شما ارسال شود."
         )
         kb = InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]])
         await safe_edit_or_send(client, chat_id, msg, text, kb)
@@ -1159,6 +1934,24 @@ async def on_message(client: Client, message: Message):
         )
         return
 
+    if state == "AWAIT_ADMIN_SLICE_VAL" and is_admin(chat_id, username):
+        USER_STATES.pop(chat_id, None)
+        if text.isdigit() and int(text) >= 5:
+            new_val = int(text)
+            set_video_slice_limit_mb(new_val)
+            await client.send_message(
+                chat_id,
+                f"✅ سقف تکه‌کردن ویدیوها با موفقیت روی **{new_val} مگابایت** تنظیم شد.",
+                reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", "adm_home")]])
+            )
+        else:
+            await client.send_message(
+                chat_id,
+                "❌ لطفاً یک عدد معتبر بزرگتر از 5 (مثلاً 25 یا 35) وارد کنید.",
+                reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت", "adm_slice")]])
+            )
+        return
+
     if state and state.startswith("AWAIT_ADMIN_PM_") and is_admin(chat_id, username):
         target_id = int(state.replace("AWAIT_ADMIN_PM_", ""))
         USER_STATES.pop(chat_id, None)
@@ -1178,6 +1971,35 @@ async def on_message(client: Client, message: Message):
         return
 
     # User Text States
+    if state == "AWAIT_IG_TIKTOK_LINK":
+        USER_STATES.pop(chat_id, None)
+        if "instagram.com" in text:
+            await handle_social_media_download(client, message, text, platform="Instagram")
+            return
+        elif "tiktok.com" in text:
+            await handle_social_media_download(client, message, text, platform="TikTok")
+            return
+        elif text.startswith("http"):
+            await handle_social_media_download(client, message, text, platform="Media")
+            return
+        else:
+            await client.send_message(
+                chat_id,
+                "❌ لینک ارسالی معتبر نیست. لطفاً یک لینک معتبر از اینستاگرام یا تیک‌تاک ارسال کنید.",
+                reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]])
+            )
+            return
+
+    if state == "AWAIT_YT_CHANNEL_SEARCH":
+        USER_STATES.pop(chat_id, None)
+        await handle_youtube_channel_search(client, message, text)
+        return
+
+    if state in ["AWAIT_YT_KEYWORD_SEARCH", "AWAIT_YT_SEARCH"]:
+        USER_STATES.pop(chat_id, None)
+        await handle_youtube_keyword_search(client, message, text)
+        return
+
     if state == "AWAIT_AI_QUERY":
         USER_STATES.pop(chat_id, None)
         status_msg = await client.send_message(chat_id, "🤖 در حال پردازش توسط هوش مصنوعی...")
@@ -1206,22 +2028,10 @@ async def on_message(client: Client, message: Message):
         await handle_music_search(client, message, text)
         return
 
-    if state == "AWAIT_YT_SEARCH":
-        USER_STATES.pop(chat_id, None)
-        await handle_youtube_search(client, message, text)
-        return
-
     # 4. Check for URL patterns
-    # --- YouTube URL ---
+    # --- YouTube URL (Direct link triggers interactive Video Card with format & quality selection) ---
     if "youtube.com" in text or "youtu.be" in text:
-        USER_DATA.setdefault(chat_id, {})["last_yt_url"] = text
-        kb = InlineKeyboard(
-            [InlineKeyboardButton("🎬 دانلود ویدیو (720p)", "dl_yt_mp4_720p"),
-             InlineKeyboardButton("🎬 کیفیت متوسط (480p)", "dl_yt_mp4_480p")],
-            [InlineKeyboardButton("🎵 استخراج صوت (MP3)", "dl_yt_mp3_audio")],
-            [InlineKeyboardButton("🔙 انصراف", "menu_main")]
-        )
-        await message.reply("🎬 **لینک یوتیوب شناسایی شد.**\nکیفیت و فرمت دلخواه را انتخاب کنید:", reply_markup=kb)
+        await render_yt_video_card(client, chat_id, text)
         return
 
     # --- Spotify URL ---
@@ -1376,40 +2186,23 @@ async def handle_music_search(client: Client, message: Message, query: str):
         await status_msg.edit_text(f"❌ خطا در جستجو: {e}")
 
 
-async def handle_youtube_search(client: Client, message: Message, query: str):
+async def handle_youtube_channel_search(client: Client, message: Message, query: str):
     chat_id = message.chat.id
-    status_msg = await message.reply(f"🔍 در حال جستجو در یوتیوب: «{query}»...")
+    status_msg = await message.reply(f"⏳ در حال جستجوی کانال‌های یوتیوب برای «{query}»...")
+    channels = await asyncio.to_thread(search_youtube_channels, query, 15)
+    USER_DATA.setdefault(chat_id, {})["yt_channels"] = channels
+    USER_DATA.setdefault(chat_id, {})["yt_ch_query"] = query
+    await render_yt_channels_page(client, chat_id, page=0, msg=status_msg)
 
-    try:
-        # Search YouTube via yt-dlp flat-playlist extraction
-        cmd = [
-            sys.executable, "-m", "yt_dlp",
-            f"ytsearch5:{query}",
-            "--flat-playlist",
-            "--dump-json"
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-        lines = [line for line in res.stdout.splitlines() if line.strip()]
 
-        if not lines:
-            await status_msg.edit_text("❌ نتیجه‌ای در یوتیوب یافت نشد.")
-            return
-
-        kb = InlineKeyboard()
-        for idx, line in enumerate(lines[:5], 1):
-            item = json.loads(line)
-            vid = item.get("id")
-            title = item.get("title", f"Video {idx}")[:35]
-            # Store in USER_DATA
-            USER_DATA.setdefault(chat_id, {})[f"yt_{vid}"] = f"https://www.youtube.com/watch?v={vid}"
-            kb.add_row((f"▶️ {idx}. {title}", f"dl_yt_mp4_720p_{vid}"))
-
-        kb.add_row(("🔙 بازگشت", "menu_youtube"))
-        await status_msg.edit_text("🎬 **نتایج جستجوی یوتیوب:**", reply_markup=kb)
-
-    except Exception as e:
-        traceback.print_exc()
-        await status_msg.edit_text(f"❌ خطا در جستجوی یوتیوب: {e}")
+async def handle_youtube_keyword_search(client: Client, message: Message, query: str):
+    chat_id = message.chat.id
+    status_msg = await message.reply(f"⏳ در حال جستجوی ویدیوها برای «{query}»...")
+    videos = await asyncio.to_thread(search_youtube_videos, query, 25)
+    USER_DATA.setdefault(chat_id, {})["yt_kw_results"] = videos
+    USER_DATA.setdefault(chat_id, {})["yt_kw_query"] = query
+    USER_DATA.setdefault(chat_id, {})["yt_kw_filters"] = {"dur": "all", "sort": "rel"}
+    await render_yt_keyword_page(client, chat_id, page=0, msg=status_msg)
 
 
 # ----------------- WEB SERVER FOR RENDER HEALTH CHECKS -----------------

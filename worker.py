@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 GitHub Actions Worker for TahasBot (Bale Messenger)
-Runs on GitHub Actions 7GB RAM runner to download heavy YouTube videos & audios
-and upload them directly to Bale Messenger.
+Runs on GitHub Actions 7GB RAM runner to download heavy YouTube videos & audios,
+send description/comments/subtitles/thumbnail first, dynamically slice large files
+according to admin limits, and upload them sequentially to Bale Messenger.
 """
 
 import os
+import re
 import sys
 import time
+import math
 import glob
 import json
 import subprocess
@@ -34,6 +37,11 @@ CHAT_ID = os.environ.get("CHAT_ID", "").strip()
 MESSAGE_ID = os.environ.get("MESSAGE_ID", "0").strip()
 FORMAT = os.environ.get("YT_FORMAT", "mp4").strip().lower()
 QUALITY = os.environ.get("YT_QUALITY", "720p").strip().lower()
+SLICE_MB = float(os.environ.get("SLICE_MB", "25") or 25)
+SEND_SUBTITLES = os.environ.get("SEND_SUBTITLES", "false").strip().lower() == "true"
+SEND_THUMBNAIL = os.environ.get("SEND_THUMBNAIL", "false").strip().lower() == "true"
+SEND_DESCRIPTION = os.environ.get("SEND_DESCRIPTION", "false").strip().lower() == "true"
+SEND_COMMENTS = os.environ.get("SEND_COMMENTS", "false").strip().lower() == "true"
 
 WORK_DIR = "downloads"
 os.makedirs(WORK_DIR, exist_ok=True)
@@ -56,7 +64,7 @@ def update_progress(text: str):
 
 
 def send_message(text: str):
-    if not (BOT_TOKEN and CHAT_ID):
+    if not (BOT_TOKEN and CHAT_ID) or CHAT_ID == "0":
         return
     try:
         url = f"{BALE_API}/bot{BOT_TOKEN}/sendMessage"
@@ -85,6 +93,11 @@ def delete_progress():
         pass
 
 
+def sanitize_filename(name: str) -> str:
+    cleaned = re.sub(r'[\\/*?:"<>|]', '', name).strip()
+    return cleaned[:50] if cleaned else "Video"
+
+
 def probe_media_file(file_path: str) -> dict:
     try:
         cmd = [
@@ -107,33 +120,34 @@ def probe_media_file(file_path: str) -> dict:
         return {"duration": 0, "width": 1280, "height": 720}
 
 
-def compress_video_if_needed(video_path: str, max_mb: float = 48.0) -> str:
-    size_mb = os.path.getsize(video_path) / (1024 * 1024)
-    if size_mb <= max_mb:
-        return video_path
-
-    print(f"File size {size_mb:.2f}MB exceeds {max_mb}MB limit. Compressing...", flush=True)
-    update_progress(f"🗜 حجم ویدیو ({size_mb:.1f} مگابایت) بیش از حد مجاز بله است. در حال بهینه‌سازی...")
-
-    out_compressed = os.path.join(WORK_DIR, f"comp_{Path(video_path).name}")
-    # Two-pass or CRF 28 encoding to safely hit under limit
-    cmd = [
-        "ffmpeg", "-y", "-i", video_path,
-        "-vf", "scale=-2:480",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
-        "-c:a", "aac", "-b:a", "128k",
-        out_compressed
-    ]
-    res = subprocess.run(cmd, capture_output=True, timeout=180)
-    if res.returncode == 0 and os.path.exists(out_compressed):
-        return out_compressed
-    return video_path
+def upload_photo_to_bale(photo_path: str, caption: str):
+    if CHAT_ID == "0":
+        return
+    url = f"{BALE_API}/bot{BOT_TOKEN}/sendPhoto"
+    with open(photo_path, "rb") as pf:
+        files = {"photo": (Path(photo_path).name, pf, "image/jpeg")}
+        data = {"chat_id": CHAT_ID, "caption": caption[:1024]}
+        res = _SESSION.post(url, data=data, files=files, timeout=60, verify=False)
+        print("Bale sendPhoto:", res.status_code, flush=True)
 
 
-def upload_video_to_bale(video_path: str, caption: str, info: dict):
-    update_progress("⬆️ در حال ارسال ویدیو به بله...")
+def upload_document_to_bale(doc_path: str, caption: str):
+    if CHAT_ID == "0":
+        return
+    url = f"{BALE_API}/bot{BOT_TOKEN}/sendDocument"
+    with open(doc_path, "rb") as df:
+        files = {"document": (Path(doc_path).name, df, "application/octet-stream")}
+        data = {"chat_id": CHAT_ID, "caption": caption[:1024]}
+        res = _SESSION.post(url, data=data, files=files, timeout=60, verify=False)
+        print("Bale sendDocument:", res.status_code, flush=True)
+
+
+def upload_video_to_bale(video_path: str, caption: str, probe: dict = None):
+    if CHAT_ID == "0":
+        return
     url = f"{BALE_API}/bot{BOT_TOKEN}/sendVideo"
-    probe = probe_media_file(video_path)
+    if not probe:
+        probe = probe_media_file(video_path)
 
     with open(video_path, "rb") as vf:
         files = {"video": (Path(video_path).name, vf, "video/mp4")}
@@ -147,11 +161,17 @@ def upload_video_to_bale(video_path: str, caption: str, info: dict):
         res = _SESSION.post(url, data=data, files=files, timeout=300, verify=False)
         print("Bale sendVideo response:", res.status_code, res.text[:200], flush=True)
         if res.status_code != 200:
-            raise RuntimeError(f"Bale sendVideo failed: {res.status_code} {res.text}")
+            print("sendVideo failed, attempting sendDocument fallback...", flush=True)
+            vf.seek(0)
+            url_doc = f"{BALE_API}/bot{BOT_TOKEN}/sendDocument"
+            files_doc = {"document": (Path(video_path).name, vf, "video/mp4")}
+            res_doc = _SESSION.post(url_doc, data={"chat_id": CHAT_ID, "caption": caption[:1024]}, files=files_doc, timeout=300, verify=False)
+            print("Bale fallback sendDocument:", res_doc.status_code, flush=True)
 
 
-def upload_audio_to_bale(audio_path: str, caption: str, title: str, artist: str, duration: int):
-    update_progress("⬆️ در حال ارسال موزیک به بله...")
+def upload_audio_to_bale(audio_path: str, caption: str, title: str, duration: int):
+    if CHAT_ID == "0":
+        return
     url = f"{BALE_API}/bot{BOT_TOKEN}/sendAudio"
 
     with open(audio_path, "rb") as af:
@@ -160,13 +180,103 @@ def upload_audio_to_bale(audio_path: str, caption: str, title: str, artist: str,
             "chat_id": CHAT_ID,
             "caption": caption[:1024],
             "title": title[:100],
-            "performer": artist[:100],
             "duration": duration
         }
         res = _SESSION.post(url, data=data, files=files, timeout=300, verify=False)
         print("Bale sendAudio response:", res.status_code, res.text[:200], flush=True)
         if res.status_code != 200:
-            raise RuntimeError(f"Bale sendAudio failed: {res.status_code} {res.text}")
+            print("sendAudio failed, attempting sendDocument fallback...", flush=True)
+            af.seek(0)
+            url_doc = f"{BALE_API}/bot{BOT_TOKEN}/sendDocument"
+            files_doc = {"document": (Path(audio_path).name, af, "audio/mpeg")}
+            res_doc = _SESSION.post(url_doc, data={"chat_id": CHAT_ID, "caption": caption[:1024]}, files=files_doc, timeout=300, verify=False)
+            print("Bale fallback sendDocument:", res_doc.status_code, flush=True)
+
+
+def slice_video(video_path: str, slice_mb: float, title: str, probe: dict = None) -> list:
+    """Slice a large video into sequential parts under slice_mb limit using FFmpeg."""
+    if not probe:
+        probe = probe_media_file(video_path)
+    total_duration = probe.get("duration", 0)
+    file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+
+    target_part_mb = slice_mb * 0.88
+    num_parts = max(2, math.ceil(file_size_mb / target_part_mb))
+    part_duration = total_duration / num_parts if total_duration > 0 else 300
+
+    clean_t = sanitize_filename(title)
+    parts = []
+
+    print(f"Slicing video ({file_size_mb:.1f}MB) into {num_parts} parts (target limit: {slice_mb}MB)...", flush=True)
+
+    for i in range(num_parts):
+        start_time = i * part_duration
+        part_name = f"[{clean_t}] Part {i+1:03d} of {num_parts:03d}.mp4"
+        part_path = os.path.join(WORK_DIR, part_name)
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", str(round(start_time, 2)),
+            "-i", video_path,
+        ]
+        if i < num_parts - 1:
+            cmd.extend(["-t", str(round(part_duration, 2))])
+
+        cmd.extend([
+            "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
+            "-movflags", "+faststart",
+            part_path
+        ])
+
+        res = subprocess.run(cmd, capture_output=True)
+        if res.returncode == 0 and os.path.exists(part_path) and os.path.getsize(part_path) > 1000:
+            part_sz = os.path.getsize(part_path) / (1024 * 1024)
+            print(f"Generated {part_name} ({part_sz:.1f}MB)", flush=True)
+            parts.append(part_path)
+        else:
+            print(f"Error slicing part {i+1}: {res.stderr.decode('utf-8', errors='ignore')}", flush=True)
+
+    return parts if parts else [video_path]
+
+
+def slice_audio(audio_path: str, slice_mb: float, title: str, duration: int = 0) -> list:
+    """Slice a large audio into sequential parts under slice_mb limit using FFmpeg."""
+    file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+    target_part_mb = slice_mb * 0.88
+    num_parts = max(2, math.ceil(file_size_mb / target_part_mb))
+    part_duration = duration / num_parts if duration > 0 else 600
+
+    clean_t = sanitize_filename(title)
+    parts = []
+
+    print(f"Slicing audio ({file_size_mb:.1f}MB) into {num_parts} parts (target limit: {slice_mb}MB)...", flush=True)
+
+    for i in range(num_parts):
+        start_time = i * part_duration
+        part_name = f"[{clean_t}] Part {i+1:03d} of {num_parts:03d}.mp3"
+        part_path = os.path.join(WORK_DIR, part_name)
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", str(round(start_time, 2)),
+            "-i", audio_path,
+        ]
+        if i < num_parts - 1:
+            cmd.extend(["-t", str(round(part_duration, 2))])
+
+        cmd.extend([
+            "-c", "copy",
+            part_path
+        ])
+
+        res = subprocess.run(cmd, capture_output=True)
+        if res.returncode == 0 and os.path.exists(part_path) and os.path.getsize(part_path) > 1000:
+            part_sz = os.path.getsize(part_path) / (1024 * 1024)
+            print(f"Generated {part_name} ({part_sz:.1f}MB)", flush=True)
+            parts.append(part_path)
+
+    return parts if parts else [audio_path]
 
 
 def main():
@@ -174,9 +284,97 @@ def main():
         print("Missing required parameters (YT_URL, BALE_BOT_TOKEN, or CHAT_ID)", flush=True)
         sys.exit(1)
 
-    print(f"Starting worker for URL: {URL} | Format: {FORMAT} | Quality: {QUALITY}", flush=True)
-    update_progress("🚀 سرور اختصاصی شروع به کار کرد!\n⏳ در حال دریافت اطلاعات ویدیو...")
+    print(f"Starting worker for URL: {URL} | Format: {FORMAT} | Quality: {QUALITY} | Slice limit: {SLICE_MB}MB", flush=True)
+    update_progress("🚀 سرور اختصاصی فعال شد!\n⏳ در حال دریافت اطلاعات ویدیو...")
 
+    # Step 1: Extract Video Metadata (and comments if requested)
+    import yt_dlp
+    ydl_meta_opts = {
+        "quiet": True,
+        "skip_download": True,
+        "getcomments": SEND_COMMENTS,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android"],
+                "max_comments": ["5", "all", "1"]
+            }
+        }
+    }
+    if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
+        ydl_meta_opts["cookiefile"] = "cookies.txt"
+
+    video_info = {}
+    try:
+        with yt_dlp.YoutubeDL(ydl_meta_opts) as ydl:
+            video_info = ydl.extract_info(URL, download=False)
+    except Exception as e:
+        print(f"Metadata extraction warning: {e}", flush=True)
+
+    title = video_info.get("title") or "YouTube Media"
+    clean_title = sanitize_filename(title)
+
+    # Step 2: Send extras first as requested (Description, Comments, Thumbnail, Subtitles)
+    if SEND_DESCRIPTION and video_info.get("description"):
+        desc = video_info["description"].strip()
+        if desc:
+            if len(desc) > 3800:
+                desc = desc[:3800] + "\n\n... (ادامه در صفحه یوتیوب)"
+            update_progress("📄 در حال ارسال توضیحات ویدیو...")
+            send_message(f"📄 **توضیحات ویدیوی یوتیوب:**\n🎬 **{title}**\n\n{desc}")
+            time.sleep(1)
+
+    if SEND_COMMENTS and video_info.get("comments"):
+        comments = video_info["comments"]
+        if comments:
+            update_progress("💬 در حال ارسال برترین نظرات کاربران...")
+            comm_lines = [f"💬 **برترین نظرات کاربران یوتیوب:**\n🎬 **{title}**\n"]
+            for idx, c in enumerate(comments[:5]):
+                c_author = c.get("author", "کاربر")
+                c_text = (c.get("text", "") or "").strip().replace("\n", " ")[:220]
+                c_likes = c.get("like_count", 0)
+                like_str = f" (👍 {c_likes:,})" if c_likes else ""
+                comm_lines.append(f"{idx+1}️⃣ **{c_author}**{like_str}:\n{c_text}\n")
+            send_message("\n".join(comm_lines))
+            time.sleep(1)
+
+    if SEND_THUMBNAIL and video_info.get("thumbnail"):
+        thumb_url = video_info["thumbnail"]
+        update_progress("🖼 در حال ارسال کاور اصلی ویدیو...")
+        try:
+            t_res = _SESSION.get(thumb_url, timeout=20)
+            if t_res.status_code == 200:
+                t_path = os.path.join(WORK_DIR, f"thumb_{int(time.time())}.jpg")
+                with open(t_path, "wb") as tf:
+                    tf.write(t_res.content)
+                upload_photo_to_bale(t_path, caption=f"🖼 **کاور اصلی با بالاترین کیفیت**\n🎬 **{title}**")
+                time.sleep(1)
+        except Exception as e:
+            print(f"Send thumbnail error: {e}", flush=True)
+
+    if SEND_SUBTITLES:
+        update_progress("📝 در حال دانلود و استخراج زیرنویس‌ها...")
+        sub_opts = {
+            "quiet": True,
+            "skip_download": True,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": ["fa", "en", "fa-.*", "en-.*"],
+            "subtitlesformat": "srt",
+            "outtmpl": os.path.join(WORK_DIR, f"sub_%(id)s.%(ext)s")
+        }
+        if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
+            sub_opts["cookiefile"] = "cookies.txt"
+        try:
+            with yt_dlp.YoutubeDL(sub_opts) as ydl:
+                ydl.download([URL])
+            sub_files = glob.glob(os.path.join(WORK_DIR, "sub_*.srt"))
+            for sf in sub_files[:3]:
+                upload_document_to_bale(sf, caption=f"📝 **فایل زیرنویس ویدیو (SRT):**\n🎬 **{title}**")
+                time.sleep(1)
+        except Exception as e:
+            print(f"Subtitle download warning: {e}", flush=True)
+
+    # Step 3: Download media file
     ts = int(time.time())
     out_template = os.path.join(WORK_DIR, f"yt_{ts}_%(id)s.%(ext)s")
 
@@ -192,11 +390,8 @@ def main():
     if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
         cmd.extend(["--cookies", "cookies.txt"])
 
-
-
     if FORMAT == "mp3" or "audio" in QUALITY:
-        # Download best audio and convert to 320k MP3
-        update_progress("📥 در حال دانلود ترک صوتی با بالاترین کیفیت...")
+        update_progress("📥 در حال دانلود ترک صوتی با بالاترین کیفیت (320kbps)...")
         cmd.extend([
             "-f", "ba/b",
             "-x", "--audio-format", "mp3",
@@ -205,7 +400,6 @@ def main():
             "--embed-thumbnail"
         ])
     else:
-        # Download video matching quality
         max_h = 720
         if "1080" in QUALITY:
             max_h = 1080
@@ -213,6 +407,8 @@ def main():
             max_h = 480
         elif "360" in QUALITY:
             max_h = 360
+        elif "240" in QUALITY:
+            max_h = 240
 
         update_progress(f"📥 در حال دانلود ویدیو با کیفیت {max_h}p...")
         cmd.extend([
@@ -220,20 +416,16 @@ def main():
             "--merge-output-format", "mp4"
         ])
 
-
     cmd.append(URL)
-    print("Executing command:", " ".join(cmd), flush=True)
+    print("Executing download command:", " ".join(cmd), flush=True)
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    print("yt-dlp stdout:", res.stdout[-400:], flush=True)
 
     if res.returncode != 0:
         print("yt-dlp error:", res.stderr[-500:], flush=True)
-        update_progress(f"❌ خطا در دانلود ویدیو:\n{res.stderr[-200:]}")
+        update_progress(f"❌ خطا در دانلود رسانه:\n{res.stderr[-200:]}")
         sys.exit(1)
 
-    # Find the output file
     downloaded_files = glob.glob(os.path.join(WORK_DIR, f"yt_{ts}_*.*"))
-    # Filter out thumbnails or temp files
     media_files = [f for f in downloaded_files if f.lower().endswith((".mp4", ".mp3", ".m4a", ".webm", ".mkv"))]
 
     if not media_files:
@@ -241,31 +433,58 @@ def main():
         sys.exit(1)
 
     target_file = media_files[0]
-    print(f"Target downloaded file: {target_file} (Size: {os.path.getsize(target_file)} bytes)", flush=True)
+    total_size_mb = os.path.getsize(target_file) / (1024 * 1024)
+    print(f"Target downloaded file: {target_file} (Size: {total_size_mb:.2f} MB)", flush=True)
 
-    # Extract title from filename or yt-dlp output
-    stem_title = Path(target_file).stem
-    caption = f"🎬 **{stem_title}**\n\n⚡️ دانلود شده توسط @tahasbot"
+    # Step 4: Slicing Check & Sequential Upload
+    is_audio = target_file.lower().endswith(".mp3")
 
-    # Check if this is a test dispatch
-    if CHAT_ID == "0":
-        print("Test run completed successfully without Bale upload (CHAT_ID=0).", flush=True)
-        return
-
-    if target_file.lower().endswith(".mp3"):
+    if is_audio:
         probe = probe_media_file(target_file)
-        upload_audio_to_bale(
-            audio_path=target_file,
-            caption=f"🎵 **{stem_title}**\n⚡️ دانلود شده توسط @tahasbot",
-            title=stem_title,
-            artist="YouTube Audio",
-            duration=probe["duration"]
-        )
-    else:
-        # Check size and compress if necessary
-        final_video = compress_video_if_needed(target_file, max_mb=48.0)
-        upload_video_to_bale(final_video, caption, {})
+        duration = probe.get("duration", 0)
 
+        if total_size_mb <= SLICE_MB:
+            update_progress("⬆️ در حال ارسال موزیک به بله...")
+            upload_audio_to_bale(
+                audio_path=target_file,
+                caption=f"🎵 **{title}**\n⚡️ دانلود شده توسط @tahasbot",
+                title=clean_title,
+                duration=duration
+            )
+        else:
+            update_progress(f"✂️ حجم فایل ({total_size_mb:.1f}MB) بیش از سقف بله ({SLICE_MB}MB) است. در حال تکه‌کردن...")
+            parts = slice_audio(target_file, SLICE_MB, title, duration=duration)
+            for idx, part in enumerate(parts):
+                part_probe = probe_media_file(part)
+                update_progress(f"⬆️ در حال ارسال پارت {idx + 1} از {len(parts)} به بله...")
+                upload_audio_to_bale(
+                    audio_path=part,
+                    caption=f"🎵 **{title}**\n📦 **Part {idx + 1:03d} of {len(parts):03d}**\n\n⚡️ دانلود شده توسط @tahasbot",
+                    title=f"{clean_title} Part {idx + 1:03d}",
+                    duration=part_probe.get("duration", 0)
+                )
+                time.sleep(2)
+    else:
+        probe = probe_media_file(target_file)
+        if total_size_mb <= SLICE_MB:
+            update_progress("⬆️ در حال ارسال ویدیو به بله...")
+            upload_video_to_bale(
+                video_path=target_file,
+                caption=f"🎬 **{title}**\n\n⚡️ دانلود شده توسط @tahasbot",
+                probe=probe
+            )
+        else:
+            update_progress(f"✂️ حجم ویدیو ({total_size_mb:.1f}MB) بیش از سقف بله ({SLICE_MB}MB) است. در حال تکه‌کردن به پارت‌ها...")
+            parts = slice_video(target_file, SLICE_MB, title, probe=probe)
+            for idx, part in enumerate(parts):
+                part_probe = probe_media_file(part)
+                update_progress(f"⬆️ در حال ارسال پارت {idx + 1} از {len(parts)} به بله...")
+                upload_video_to_bale(
+                    video_path=part,
+                    caption=f"🎬 **{title}**\n📦 **Part {idx + 1:03d} of {len(parts):03d}**\n\n⚡️ دانلود شده توسط @tahasbot",
+                    probe=part_probe
+                )
+                time.sleep(2)
 
     delete_progress()
     print("Worker task completed successfully!", flush=True)
@@ -276,5 +495,5 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         traceback.print_exc()
-        update_progress(f"❌ خطای پیش‌بینی نشده:\n{str(e)[:250]}")
+        update_progress(f"❌ خطای پیش‌بینی نشده در سرور پردازش:\n{str(e)[:250]}")
         sys.exit(1)

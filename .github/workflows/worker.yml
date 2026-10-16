@@ -18,9 +18,29 @@ on:
         required: false
         default: 'mp4'
       quality:
-        description: 'Video Quality (720p, 480p, 360p)'
+        description: 'Video Quality (1080p, 720p, 480p, 360p, 240p)'
         required: false
         default: '720p'
+      slice_mb:
+        description: 'Slice size limit in MB'
+        required: false
+        default: '25'
+      subtitles:
+        description: 'Send subtitles (true/false)'
+        required: false
+        default: 'false'
+      thumbnail:
+        description: 'Send thumbnail (true/false)'
+        required: false
+        default: 'false'
+      description:
+        description: 'Send description (true/false)'
+        required: false
+        default: 'false'
+      comments:
+        description: 'Send top comments (true/false)'
+        required: false
+        default: 'false'
 
 jobs:
   run-worker:
@@ -59,6 +79,11 @@ jobs:
           MESSAGE_ID: ${{ github.event.inputs.message_id }}
           YT_FORMAT: ${{ github.event.inputs.format }}
           YT_QUALITY: ${{ github.event.inputs.quality }}
+          SLICE_MB: ${{ github.event.inputs.slice_mb }}
+          SEND_SUBTITLES: ${{ github.event.inputs.subtitles }}
+          SEND_THUMBNAIL: ${{ github.event.inputs.thumbnail }}
+          SEND_DESCRIPTION: ${{ github.event.inputs.description }}
+          SEND_COMMENTS: ${{ github.event.inputs.comments }}
           MONGO_URI: ${{ secrets.MONGO_URI }}
         run: |
           python worker.py

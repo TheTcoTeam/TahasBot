@@ -123,47 +123,27 @@ def get_main_keyboard(chat_id, get_lang_fn=None, is_admin_fn=None) -> InlineKeyb
 
 
 def get_youtube_keyboard(chat_id, get_lang_fn=None) -> InlineKeyboardMarkup:
-    """YouTube submenu per FigJam."""
-    lang = get_lang_fn(chat_id) if get_lang_fn else "fa"
-    if lang == "fa":
-        labels = ["🔍 جستجو در یوتیوب", "🔔 اشتراک در کانال", "🎬 ویرایشگر ویدیو", "🔙 بازگشت"]
-    else:
-        labels = ["🔍 Search YouTube", "🔔 Channel Subscription", "🎬 Video Editor", "🔙 Back"]
-
+    """YouTube submenu with Keyword and Channel search."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(labels[0], callback_data="yt_search_menu")],
-        [InlineKeyboardButton(labels[1], callback_data="sub_add_yt")],
-        [InlineKeyboardButton(labels[2], callback_data="menu_vedit")],
-        [InlineKeyboardButton(labels[3], callback_data="menu_main")]
+        [InlineKeyboardButton("🔍 جستجو با کلمه کلیدی (Keyword)", callback_data="yt_search_kw")],
+        [InlineKeyboardButton("👤 جستجو در کانال‌ها (Channel)", callback_data="yt_search_ch")],
+        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu_main")]
     ])
 
 
 def get_youtube_search_keyboard(chat_id, get_lang_fn=None) -> InlineKeyboardMarkup:
     """YouTube search options: Keyword or Channels."""
-    lang = get_lang_fn(chat_id) if get_lang_fn else "fa"
-    if lang == "fa":
-        labels = ["🔤 جستجو با کلمه کلیدی", "👤 جستجوی کانال‌ها", "🔙 بازگشت"]
-    else:
-        labels = ["🔤 Search with Keyword", "👤 Search Channels", "🔙 Back"]
-
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(labels[0], callback_data="yt_keyword")],
-        [InlineKeyboardButton(labels[1], callback_data="yt_channel")],
-        [InlineKeyboardButton(labels[2], callback_data="menu_youtube")]
+        [InlineKeyboardButton("🔍 جستجو با کلمه کلیدی", callback_data="yt_search_kw")],
+        [InlineKeyboardButton("👤 جستجو در کانال‌ها", callback_data="yt_search_ch")],
+        [InlineKeyboardButton("🔙 بازگشت به منوی یوتیوب", callback_data="menu_youtube")]
     ])
 
 
 def get_ig_tiktok_keyboard(chat_id, get_lang_fn=None) -> InlineKeyboardMarkup:
-    """Instagram / TikTok submenu per FigJam."""
-    lang = get_lang_fn(chat_id) if get_lang_fn else "fa"
-    if lang == "fa":
-        labels = ["🔔 اشتراک در صفحه / پیج", "🔙 بازگشت"]
-    else:
-        labels = ["🔔 Page Subscription", "🔙 Back"]
-
+    """Instagram / TikTok submenu."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(labels[0], callback_data="sub_add_ig_tiktok")],
-        [InlineKeyboardButton(labels[1], callback_data="menu_main")]
+        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu_main")]
     ])
 
 
