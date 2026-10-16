@@ -187,7 +187,7 @@ def main():
         "-N", "4",
         "--buffer-size", "1024K",
         "-o", out_template,
-        "--extractor-args", "youtube:player_client=android,web"
+        "--extractor-args", "youtube:player_client=ios,android"
     ]
 
     if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
@@ -197,6 +197,7 @@ def main():
         # Download best audio and convert to 320k MP3
         update_progress("📥 در حال دانلود ترک صوتی با بالاترین کیفیت...")
         cmd.extend([
+            "-f", "ba/b",
             "-x", "--audio-format", "mp3",
             "--audio-quality", "0",
             "--write-thumbnail",
@@ -214,9 +215,10 @@ def main():
 
         update_progress(f"📥 در حال دانلود ویدیو با کیفیت {max_h}p...")
         cmd.extend([
-            "-f", f"bestvideo[height<={max_h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={max_h}]+bestaudio/best[height<={max_h}]/best",
+            "-f", f"bv*[height<={max_h}][ext=mp4]+ba[ext=m4a]/bv*[height<={max_h}]+ba/b[height<={max_h}]/b",
             "--merge-output-format", "mp4"
         ])
+
 
     cmd.append(URL)
     print("Executing command:", " ".join(cmd), flush=True)
@@ -244,6 +246,11 @@ def main():
     stem_title = Path(target_file).stem
     caption = f"🎬 **{stem_title}**\n\n⚡️ دانلود شده توسط @tahasbot"
 
+    # Check if this is a test dispatch
+    if CHAT_ID == "0":
+        print("Test run completed successfully without Bale upload (CHAT_ID=0).", flush=True)
+        return
+
     if target_file.lower().endswith(".mp3"):
         probe = probe_media_file(target_file)
         upload_audio_to_bale(
@@ -257,6 +264,7 @@ def main():
         # Check size and compress if necessary
         final_video = compress_video_if_needed(target_file, max_mb=48.0)
         upload_video_to_bale(final_video, caption, {})
+
 
     delete_progress()
     print("Worker task completed successfully!", flush=True)
