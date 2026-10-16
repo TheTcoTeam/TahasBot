@@ -42,7 +42,7 @@ MENU_STRINGS = {
     "btn_image_tools": {"fa": "🎨 ابزارهای تصویر", "en": "🎨 Image Tools", "ru": "🎨 Инструменты фото", "es": "🎨 Herramientas de Imagen"},
     "btn_tmulti_ai": {"fa": "🤖 دستیار هوش مصنوعی TMulti", "en": "🤖 TMulti AI Assistant", "ru": "🤖 ИИ-ассистент TMulti", "es": "🤖 Asistente de IA TMulti"},
     "btn_message_dev": {"fa": "📩 پیام به سازنده", "en": "📩 Message Developer", "ru": "📩 Сообщение разработчику", "es": "📩 Mensaje al desarrollador"},
-    "btn_settings": {"fa": "⚙️ تنظیمات", "en": "⚙️ Settings", "ru": "⚙️ Настройки", "es": "⚙️ Configuración"},
+    "btn_profile": {"fa": "👤 پروفایل من", "en": "👤 My Profile", "ru": "👤 Мой профиль", "es": "👤 Mi Perfil"},
     "btn_help": {"fa": "❓ راهنمای کامل", "en": "❓ Full Help Guide", "ru": "❓ Полная помощь", "es": "❓ Guía de Ayuda"},
     "btn_back": {"fa": "🔙 بازگشت", "en": "🔙 Back", "ru": "🔙 Назад", "es": "🔙 Volver"},
     "btn_back_main": {"fa": "🔙 منوی اصلی", "en": "🔙 Main Menu", "ru": "🔙 Главное меню", "es": "🔙 Menú Principal"},
@@ -65,12 +65,12 @@ def get_menu_text(key: str, lang: str = "fa", **kwargs) -> str:
     return txt
 
 
-def get_main_keyboard(chat_id, get_lang_fn=None) -> InlineKeyboardMarkup:
-    """The 9-row FigJam layout."""
+def get_main_keyboard(chat_id, get_lang_fn=None, is_admin_fn=None) -> InlineKeyboardMarkup:
+    """The 9-row FigJam layout with Profile and Admin Panel."""
     lang = get_lang_fn(chat_id) if get_lang_fn else "fa"
     def b(k): return get_menu_text(k, lang)
 
-    return InlineKeyboardMarkup([
+    rows = [
         # Row 1: YouTube | Instagram / TikTok
         [
             InlineKeyboardButton(b("btn_youtube"), callback_data="menu_youtube"),
@@ -105,16 +105,21 @@ def get_main_keyboard(chat_id, get_lang_fn=None) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(b("btn_tmulti_ai"), callback_data="menu_ai")
         ],
-        # Row 8: Message Developer | Settings
+        # Row 8: Message Developer | My Profile
         [
             InlineKeyboardButton(b("btn_message_dev"), callback_data="contact_admin"),
-            InlineKeyboardButton(b("btn_settings"), callback_data="menu_settings")
+            InlineKeyboardButton(b("btn_profile"), callback_data="menu_profile")
         ],
         # Row 9: Help (Full Width)
         [
             InlineKeyboardButton(b("btn_help"), callback_data="help_home")
         ]
-    ])
+    ]
+
+    if is_admin_fn and is_admin_fn(chat_id):
+        rows.append([InlineKeyboardButton("👑 پنل مدیریت (Admin Panel)", callback_data="adm_home")])
+
+    return InlineKeyboardMarkup(rows)
 
 
 def get_youtube_keyboard(chat_id, get_lang_fn=None) -> InlineKeyboardMarkup:

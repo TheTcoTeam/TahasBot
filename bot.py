@@ -66,36 +66,75 @@ USER_STATES: Dict[int, str] = {}
 USER_DATA: Dict[int, Dict[str, Any]] = {}
 USER_LANGS: Dict[int, str] = {}
 
+# Admin & Owner Configuration
+ADMIN_IDS = [700708432, 1433545605]
+ADMIN_USERNAMES = ["tahathegoat", "mthemolester"]
+
+
+def is_admin(user_id, username="") -> bool:
+    try:
+        if int(user_id) in ADMIN_IDS:
+            return True
+    except Exception:
+        pass
+    if username and username.lower().lstrip("@") in ADMIN_USERNAMES:
+        return True
+    return False
+
+
+def is_maintenance_mode() -> bool:
+    if db is not None:
+        try:
+            doc = db.settings.find_one({"key": "maintenance"})
+            if doc:
+                return bool(doc.get("enabled", False))
+        except Exception:
+            pass
+    return False
+
+
+def set_maintenance_mode(enabled: bool):
+    if db is not None:
+        try:
+            db.settings.update_one({"key": "maintenance"}, {"$set": {"enabled": enabled}}, upsert=True)
+        except Exception:
+            pass
+
+
+def is_user_banned(chat_id: int) -> bool:
+    if db is not None:
+        try:
+            doc = db.users.find_one({"chat_id": int(chat_id)}, {"banned": 1})
+            if doc and doc.get("banned"):
+                return True
+        except Exception:
+            pass
+    return False
+
 
 def get_user_lang(chat_id: int) -> str:
-    if chat_id in USER_LANGS:
-        return USER_LANGS[chat_id]
-    if db is not None:
-        try:
-            pref = db.prefs.find_one({"chat_id": chat_id})
-            if pref and "lang" in pref:
-                USER_LANGS[chat_id] = pref["lang"]
-                return pref["lang"]
-        except Exception:
-            pass
     return "fa"
-
-
-def set_user_lang(chat_id: int, lang: str):
-    USER_LANGS[chat_id] = lang
-    if db is not None:
-        try:
-            db.prefs.update_one({"chat_id": chat_id}, {"$set": {"lang": lang}}, upsert=True)
-        except Exception:
-            pass
 
 
 def save_user(chat_id: int, user_info: dict):
     if db is not None:
         try:
-            user_info["chat_id"] = chat_id
-            user_info["last_seen"] = int(time.time())
-            db.users.update_one({"chat_id": chat_id}, {"$set": user_info}, upsert=True)
+            now = int(time.time())
+            user_info["chat_id"] = int(chat_id)
+            user_info["last_seen"] = now
+            db.users.update_one(
+                {"chat_id": int(chat_id)},
+                {
+                    "$set": user_info,
+                    "$setOnInsert": {
+                        "first_seen": now,
+                        "events": 0,
+                        "downloads": 0,
+                        "banned": False
+                    }
+                },
+                upsert=True
+            )
         except Exception:
             pass
 
@@ -104,13 +143,26 @@ def log_activity(chat_id: int, action: str, details: str = ""):
     if db is not None:
         try:
             db.activity.insert_one({
-                "chat_id": chat_id,
+                "chat_id": int(chat_id),
                 "action": action,
-                "details": details,
+                "details": str(details)[:200],
                 "timestamp": int(time.time())
             })
+            inc_dict = {"events": 1}
+            if "download" in action.lower():
+                inc_dict["downloads"] = 1
+            db.users.update_one({"chat_id": int(chat_id)}, {"$inc": inc_dict}, upsert=True)
         except Exception:
             pass
+
+
+async def safe_edit_or_send(client: Client, chat_id: int, msg: Message, text: str, reply_markup=None):
+    if msg:
+        try:
+            return await msg.edit_text(text, reply_markup=reply_markup)
+        except Exception:
+            pass
+    return await client.send_message(chat_id, text, reply_markup=reply_markup)
 
 
 # ----------------- BALETHON CLIENT INITIALIZATION -----------------
@@ -195,7 +247,7 @@ async def cmd_start(client: Client, message: Message):
     lang = get_user_lang(chat_id)
     name = (message.author.first_name if message.author else "") or "کاربر"
     welcome_text = menus.get_menu_text("main_menu_welcome", lang=lang, name=name)
-    kb = menus.get_main_keyboard(chat_id, get_user_lang)
+    kb = menus.get_main_keyboard(chat_id, get_user_lang, is_admin)
 
     await client.send_message(chat_id, welcome_text, reply_markup=kb)
 
@@ -256,57 +308,472 @@ async def cmd_tool(client: Client, message: Message):
 
 
 
+# ----------------- USER PROFILE & ADMIN PANEL HANDLERS -----------------
+async def render_user_profile(client: Client, chat_id: int, msg: Message = None, user_obj: Any = None):
+    first_name = (user_obj.first_name if user_obj else "") or "کاربر"
+    username = (user_obj.username if user_obj else "") or ""
+    uname_str = f"@{username}" if username else "ثبت‌نشده"
+
+    admin_badge = "👑 مالک و مدیر اصلی ربات" if is_admin(chat_id, username) else "⭐️ عضو ویژه"
+
+    downloads_count = 0
+    events_count = 0
+    first_seen_str = "همین لحظه"
+    last_seen_str = "اکنون"
+    recent_acts = []
+
+    if db is not None:
+        try:
+            udoc = db.users.find_one({"chat_id": int(chat_id)})
+            if udoc:
+                downloads_count = udoc.get("downloads", 0)
+                events_count = udoc.get("events", 0)
+                fs = udoc.get("first_seen")
+                if fs:
+                    first_seen_str = time.strftime("%Y/%m/%d %H:%M", time.localtime(fs))
+                ls = udoc.get("last_seen")
+                if ls:
+                    last_seen_str = time.strftime("%Y/%m/%d %H:%M", time.localtime(ls))
+
+            cursor = db.activity.find({"chat_id": int(chat_id)}).sort("timestamp", -1).limit(4)
+            recent_acts = list(cursor)
+        except Exception as e:
+            print(f"profile error: {e}", flush=True)
+
+    act_lines = []
+    for a in recent_acts:
+        act_time = time.strftime("%H:%M", time.localtime(a.get("timestamp", time.time())))
+        act_name = a.get("action", "فعالیت").replace("_", " ")
+        act_detail = str(a.get("details", ""))[:30]
+        act_lines.append(f"• `[{act_time}]` {act_name} - {act_detail}")
+
+    if not act_lines:
+        act_lines.append("_هنوز فعالیتی ثبت نشده است_")
+
+    profile_text = (
+        "👤 **پروفایل و آمار کاربری شما:**\n\n"
+        f"🏷 **نام:** {first_name}\n"
+        f"🔗 **یوزرنیم:** {uname_str}\n"
+        f"🆔 **شناسه عددی:** `{chat_id}`\n"
+        f"🔰 **سطح دسترسی:** {admin_badge}\n\n"
+        f"📊 **آمار استفاده از ربات:**\n"
+        f"⬇️ کل دانلودهای موفق: **{downloads_count}** فایل\n"
+        f"⚡️ مجموع درخواست‌ها: **{events_count}** بار\n"
+        f"🕒 تاریخ اولین بازدید: **{first_seen_str}**\n"
+        f"🕒 آخرین فعالیت: **{last_seen_str}**\n\n"
+        f"📜 **آخرین فعالیت‌های ثبت‌شده:**\n" + "\n".join(act_lines)
+    )
+
+    kb = InlineKeyboard([
+        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]
+    ])
+    await safe_edit_or_send(client, chat_id, msg, profile_text, kb)
+
+
+async def cmd_admin(client: Client, message: Message):
+    chat_id = message.chat.id
+    username = (message.author.username if message.author else "") or ""
+    if not is_admin(chat_id, username):
+        return await client.send_message(chat_id, "⛔️ این بخش مختص مدیریت و مالک ربات است.")
+    await render_admin_home(client, chat_id)
+
+
+async def render_admin_home(client: Client, chat_id: int, msg: Message = None):
+    if not is_admin(chat_id):
+        return
+
+    maint = is_maintenance_mode()
+    maint_status = "🔴 حالت تعمیرات فعال است" if maint else "🟢 ربات آنلاین و فعال است"
+    maint_toggle_btn = "🟢 خاموش کردن تعمیرات (فعال‌سازی)" if maint else "🔴 فعال‌سازی حالت تعمیرات (تعلیق)"
+
+    total_users = 0
+    active_24h = 0
+    total_dls = 0
+    now = time.time()
+    if db is not None:
+        try:
+            total_users = db.users.count_documents({})
+            active_24h = db.users.count_documents({"last_seen": {"$gt": now - 86400}})
+            total_dls = db.activity.count_documents({"action": {"$regex": "download"}})
+        except Exception:
+            pass
+
+    text = (
+        "🛠 **پنل مدیریت پیشرفته طه (Admin Panel)**\n\n"
+        f"🚦 **وضعیت ربات:** {maint_status}\n"
+        f"👥 کل کاربران: **{total_users}** نفر\n"
+        f"🟢 کاربران ۲۴ ساعت گذشته: **{active_24h}** نفر\n"
+        f"⬇️ کل دانلودها: **{total_dls}** فایل\n\n"
+        "بخش مورد نظر خود را انتخاب کنید:"
+    )
+
+    kb = InlineKeyboard([
+        [InlineKeyboardButton("📊 آمار و ارقام جامع", "adm_stats"), InlineKeyboardButton("👥 مدیریت کاربران", "adm_users_0_seen")],
+        [InlineKeyboardButton("🔍 جستجوی کاربر", "adm_search"), InlineKeyboardButton("📜 جریان زنده فعالیت‌ها", "adm_act_0")],
+        [InlineKeyboardButton("📢 ارسال همگانی (Broadcast)", "adm_bc")],
+        [InlineKeyboardButton(maint_toggle_btn, "adm_maint")],
+        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]
+    ])
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_admin_stats(client: Client, chat_id: int, msg: Message = None):
+    if not is_admin(chat_id):
+        return
+
+    now = time.time()
+    total_users = 0
+    banned_users = 0
+    active_24h = 0
+    active_7d = 0
+    total_dls = 0
+    dls_24h = 0
+    total_events = 0
+
+    if db is not None:
+        try:
+            total_users = db.users.count_documents({})
+            banned_users = db.users.count_documents({"banned": True})
+            active_24h = db.users.count_documents({"last_seen": {"$gt": now - 86400}})
+            active_7d = db.users.count_documents({"last_seen": {"$gt": now - 604800}})
+            total_dls = db.activity.count_documents({"action": {"$regex": "download"}})
+            dls_24h = db.activity.count_documents({"action": {"$regex": "download"}, "timestamp": {"$gt": now - 86400}})
+            total_events = db.activity.count_documents({})
+        except Exception as e:
+            print(f"stats error: {e}", flush=True)
+
+    stats_text = (
+        "📊 **آمار و تحلیل جامع عملکرد ربات:**\n\n"
+        f"👥 **کاربران:**\n"
+        f"• کل اعضا: **{total_users}** نفر\n"
+        f"• فعال در ۲۴ ساعت: **{active_24h}** نفر\n"
+        f"• فعال در ۷ روز اخیر: **{active_7d}** نفر\n"
+        f"• کاربران مسدود شده: **{banned_users}** نفر\n\n"
+        f"⬇️ **دانلودها و رسانه‌ها:**\n"
+        f"• کل دانلودهای ثبت‌شده: **{total_dls}** فایل\n"
+        f"• دانلودهای ۲۴ ساعت گذشته: **{dls_24h}** فایل\n"
+        f"• کل درخواست‌ها و لاگ‌ها: **{total_events}** رویداد\n\n"
+        f"⚙️ **زیرساخت ابری:**\n"
+        f"• هاست پیام‌رسان: Render Web Service (پایداری ۲۴ ساعته)\n"
+        f"• سرور اختصاصی یوتیوب: GitHub Actions 7GB Runner\n"
+        f"• پایگاه داده: MongoDB Atlas Dedicated Cluster"
+    )
+
+    kb = InlineKeyboard([
+        [InlineKeyboardButton("🔄 به‌روزرسانی آمار", "adm_stats")],
+        [InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", "adm_home")]
+    ])
+    await safe_edit_or_send(client, chat_id, msg, stats_text, kb)
+
+
+async def render_admin_users(client: Client, chat_id: int, page: int = 0, sort: str = "seen", msg: Message = None):
+    if not is_admin(chat_id):
+        return
+
+    PAGE_SIZE = 8
+    sort_field = "events" if sort == "events" else "last_seen"
+    sort_label = "🔥 پرمصرف‌ترین" if sort == "events" else "🕒 آخرین بازدید"
+
+    total = 0
+    docs = []
+    if db is not None:
+        try:
+            total = db.users.count_documents({})
+            total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+            page = max(0, min(page, total_pages - 1))
+            docs = list(db.users.find({}).sort(sort_field, -1).skip(page * PAGE_SIZE).limit(PAGE_SIZE))
+        except Exception as e:
+            print(f"users list error: {e}", flush=True)
+
+    if not docs:
+        text = "👥 کاربری در دیتابیس یافت نشد."
+        kb = InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به پنل", "adm_home")]])
+    else:
+        total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+        text = f"👥 **لیست کاربران ربات** (صفحه {page + 1} از {total_pages})\nمرتب‌سازی: **{sort_label}**\n\nبرای مشاهده پروفایل و اعمال تغییرات، روی کاربر کلیک کنید:\n"
+
+        btn_rows = []
+        for d in docs:
+            u_id = d.get("chat_id")
+            u_name = (d.get("first_name") or "کاربر")[:16]
+            u_banned = "⛔️ " if d.get("banned") else ""
+            btn_rows.append([InlineKeyboardButton(f"{u_banned}👤 {u_name} ({u_id})", f"adm_u_{u_id}")])
+
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton("◀️ قبلی", f"adm_users_{page - 1}_{sort}"))
+        nav_row.append(InlineKeyboardButton(f"· {page + 1} / {total_pages} ·", "adm_noop"))
+        if page < total_pages - 1:
+            nav_row.append(InlineKeyboardButton("بعدی ▶️", f"adm_users_{page + 1}_{sort}"))
+        btn_rows.append(nav_row)
+
+        other_sort = "seen" if sort == "events" else "events"
+        other_label = "🕒 مرتب‌سازی بر اساس آخرین بازدید" if sort == "events" else "🔥 مرتب‌سازی بر اساس بیشترین مصرف"
+        btn_rows.append([InlineKeyboardButton(other_label, f"adm_users_0_{other_sort}")])
+        btn_rows.append([InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", "adm_home")])
+        kb = InlineKeyboard(btn_rows)
+
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_admin_user_detail(client: Client, chat_id: int, target_id: int, msg: Message = None):
+    if not is_admin(chat_id):
+        return
+
+    doc = None
+    recent_acts = []
+    if db is not None:
+        try:
+            doc = db.users.find_one({"chat_id": int(target_id)})
+            cursor = db.activity.find({"chat_id": int(target_id)}).sort("timestamp", -1).limit(5)
+            recent_acts = list(cursor)
+        except Exception:
+            pass
+
+    if not doc:
+        text = f"❌ کاربری با شناسه `{target_id}` در دیتابیس یافت نشد."
+        kb = InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به لیست کاربران", "adm_users_0_seen")]])
+    else:
+        name = doc.get("first_name") or "بی‌نام"
+        username = doc.get("username") or ""
+        uname_str = f"@{username}" if username else "ندارد"
+        banned = doc.get("banned", False)
+        status_str = "⛔️ مسدود شده" if banned else "✅ فعال و عادی"
+        dls = doc.get("downloads", 0)
+        evts = doc.get("events", 0)
+        fs = doc.get("first_seen")
+        fs_str = time.strftime("%Y/%m/%d %H:%M", time.localtime(fs)) if fs else "نامشخص"
+        ls = doc.get("last_seen")
+        ls_str = time.strftime("%Y/%m/%d %H:%M", time.localtime(ls)) if ls else "نامشخص"
+
+        act_lines = []
+        for a in recent_acts:
+            t_str = time.strftime("%m/%d %H:%M", time.localtime(a.get("timestamp", time.time())))
+            act_lines.append(f"• `[{t_str}]` {a.get('action')}: {str(a.get('details',''))[:25]}")
+        if not act_lines:
+            act_lines.append("_فعالیتی ثبت نشده_")
+
+        text = (
+            f"👤 **پروفایل و مدیریت کاربر:**\n\n"
+            f"🏷 نام: **{name}**\n"
+            f"🔗 یوزرنیم: **{uname_str}**\n"
+            f"🆔 شناسه عددی: `{target_id}`\n"
+            f"🚦 وضعیت حساب: **{status_str}**\n"
+            f"⬇️ کل دانلودها: **{dls}** فایل\n"
+            f"⚡️ کل رویدادها: **{evts}** درخواست\n"
+            f"🕒 تاریخ عضویت: **{fs_str}**\n"
+            f"🕒 آخرین حضور: **{ls_str}**\n\n"
+            f"📜 **آخرین فعالیت‌ها:**\n" + "\n".join(act_lines)
+        )
+
+        ban_btn = (
+            InlineKeyboardButton("✅ رفع مسدودی کاربر", f"adm_unban_{target_id}")
+            if banned else
+            InlineKeyboardButton("⛔️ مسدود کردن کاربر", f"adm_ban_{target_id}")
+        )
+
+        kb = InlineKeyboard([
+            [ban_btn],
+            [InlineKeyboardButton("✉️ ارسال پیام اختصاصی به کاربر", f"adm_pm_{target_id}")],
+            [InlineKeyboardButton("🔙 بازگشت به لیست کاربران", "adm_users_0_seen")]
+        ])
+
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_admin_activities(client: Client, chat_id: int, page: int = 0, msg: Message = None):
+    if not is_admin(chat_id):
+        return
+
+    PAGE_SIZE = 10
+    total = 0
+    acts = []
+    if db is not None:
+        try:
+            total = db.activity.count_documents({})
+            total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+            page = max(0, min(page, total_pages - 1))
+            acts = list(db.activity.find({}).sort("timestamp", -1).skip(page * PAGE_SIZE).limit(PAGE_SIZE))
+        except Exception:
+            pass
+
+    if not acts:
+        text = "📜 هنوز فعالیتی در سامانه ثبت نشده است."
+        kb = InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به پنل", "adm_home")]])
+    else:
+        total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+        lines = [f"📜 **جریان زنده فعالیت‌های ربات** (صفحه {page + 1} از {total_pages}):\n"]
+        for a in acts:
+            t_str = time.strftime("%H:%M:%S", time.localtime(a.get("timestamp", time.time())))
+            u_id = a.get("chat_id")
+            act = a.get("action", "activity")
+            detail = str(a.get("details", ""))[:30]
+            lines.append(f"• `[{t_str}]` `{u_id}` ➔ **{act}** ({detail})")
+
+        text = "\n".join(lines)
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton("◀️ قبلی", f"adm_act_{page - 1}"))
+        nav_row.append(InlineKeyboardButton(f"· {page + 1} / {total_pages} ·", "adm_noop"))
+        if page < total_pages - 1:
+            nav_row.append(InlineKeyboardButton("بعدی ▶️", f"adm_act_{page + 1}"))
+
+        kb = InlineKeyboard([
+            nav_row,
+            [InlineKeyboardButton("🔄 به‌روزرسانی زنده", f"adm_act_{page}")],
+            [InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", "adm_home")]
+        ])
+
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
 # ----------------- CALLBACK QUERY HANDLER -----------------
 @bot.on_callback_query()
 async def on_callback(client: Client, callback_query: CallbackQuery):
     query = callback_query
-    chat_id = query.message.chat.id
+    chat_id = query.message.chat.id if (query.message and query.message.chat) else (query.author.id if query.author else 0)
     data = query.data
     lang = get_user_lang(chat_id)
     msg = query.message
-
+    username = (query.author.username if query.author else "") or ""
 
     try:
         await query.answer()
     except Exception:
         pass
 
+    # Ban check
+    if is_user_banned(chat_id):
+        await client.send_message(chat_id, "⛔️ حساب کاربری شما مسدود شده است.")
+        return
+
+    # Maintenance check
+    if is_maintenance_mode() and not is_admin(chat_id, username) and data not in ["menu_main", "help_home"]:
+        await safe_edit_or_send(client, chat_id, msg, "🛠 **ربات در حال به‌روزرسانی و ارتقای سرور است.**\nلطفاً دقایقی دیگر مراجعه فرمایید.")
+        return
+
     # --- Main Navigation ---
     if data == "menu_main":
         USER_STATES.pop(chat_id, None)
-        name = query.author.first_name or "کاربر"
+        name = (query.author.first_name if query.author else "") or "کاربر"
         text = menus.get_menu_text("main_menu_welcome", lang=lang, name=name)
-        kb = menus.get_main_keyboard(chat_id, get_user_lang)
-        try:
-            await msg.edit_text(text, reply_markup=kb)
-        except Exception:
-            await client.send_message(chat_id, text, reply_markup=kb)
+        kb = menus.get_main_keyboard(chat_id, get_user_lang, is_admin)
+        await safe_edit_or_send(client, chat_id, msg, text, kb)
         return
 
     if data == "help_home":
         await cmd_help(client, msg)
         return
 
+    if data == "menu_profile":
+        await render_user_profile(client, chat_id, msg, user_obj=query.author)
+        return
+
+    # --- Admin Panel Callbacks (adm_*) ---
+    if data.startswith("adm_"):
+        if not is_admin(chat_id, username):
+            await safe_edit_or_send(client, chat_id, msg, "⛔️ این بخش مختص مدیریت ربات است.")
+            return
+
+        if data == "adm_home":
+            USER_STATES.pop(chat_id, None)
+            await render_admin_home(client, chat_id, msg)
+            return
+
+        if data == "adm_stats":
+            await render_admin_stats(client, chat_id, msg)
+            return
+
+        if data.startswith("adm_users_"):
+            parts = data.replace("adm_users_", "").split("_")
+            page = int(parts[0]) if parts[0].isdigit() else 0
+            sort = parts[1] if len(parts) > 1 else "seen"
+            await render_admin_users(client, chat_id, page=page, sort=sort, msg=msg)
+            return
+
+        if data.startswith("adm_u_"):
+            target_id = int(data.replace("adm_u_", ""))
+            await render_admin_user_detail(client, chat_id, target_id=target_id, msg=msg)
+            return
+
+        if data.startswith("adm_ban_"):
+            target_id = int(data.replace("adm_ban_", ""))
+            if db is not None:
+                db.users.update_one({"chat_id": target_id}, {"$set": {"banned": True}}, upsert=True)
+            await client.send_message(chat_id, f"⛔️ کاربر `{target_id}` با موفقیت مسدود شد.")
+            await render_admin_user_detail(client, chat_id, target_id=target_id, msg=msg)
+            return
+
+        if data.startswith("adm_unban_"):
+            target_id = int(data.replace("adm_unban_", ""))
+            if db is not None:
+                db.users.update_one({"chat_id": target_id}, {"$set": {"banned": False}}, upsert=True)
+            await client.send_message(chat_id, f"✅ کاربر `{target_id}` با موفقیت رفع مسدودی شد.")
+            await render_admin_user_detail(client, chat_id, target_id=target_id, msg=msg)
+            return
+
+        if data.startswith("adm_pm_"):
+            target_id = int(data.replace("adm_pm_", ""))
+            USER_STATES[chat_id] = f"AWAIT_ADMIN_PM_{target_id}"
+            await safe_edit_or_send(
+                client, chat_id, msg,
+                f"✉️ **متن پیام ارسالی به کاربر `{target_id}` را بنویسید:**",
+                InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", f"adm_u_{target_id}")]])
+            )
+            return
+
+        if data == "adm_search":
+            USER_STATES[chat_id] = "AWAIT_ADMIN_SEARCH"
+            await safe_edit_or_send(
+                client, chat_id, msg,
+                "🔍 **شناسه کاربری (عددی) یا یوزرنیم کاربر مورد نظر را بفرستید:**",
+                InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "adm_home")]])
+            )
+            return
+
+        if data == "adm_bc":
+            USER_STATES[chat_id] = "AWAIT_BROADCAST"
+            await safe_edit_or_send(
+                client, chat_id, msg,
+                "📢 **متن پیام همگانی را بنویسید:**\n\nاین پیام برای تمام کاربران ثبت‌شده در ربات ارسال خواهد شد.",
+                InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "adm_home")]])
+            )
+            return
+
+        if data == "adm_maint":
+            new_val = not is_maintenance_mode()
+            set_maintenance_mode(new_val)
+            await render_admin_home(client, chat_id, msg)
+            return
+
+        if data.startswith("adm_act_"):
+            page_str = data.replace("adm_act_", "")
+            page = int(page_str) if page_str.isdigit() else 0
+            await render_admin_activities(client, chat_id, page=page, msg=msg)
+            return
+
+        if data == "adm_noop":
+            return
+
+    # --- Submenu Navigation ---
     if data == "menu_youtube":
         text = (
             "▶️ **دانلود از یوتیوب:**\n\n"
             "شما می‌توانید لینک هر ویدیو یوتیوب را مستقیماً بفرستید، یا روی دکمه زیر کلیک کرده و نام ویدیو را برای جستجو تایپ کنید."
-            if lang == "fa" else
-            "▶️ **YouTube Downloader:**\n\n"
-            "Send any YouTube link directly, or type keywords to search."
         )
         kb = InlineKeyboard([
             [InlineKeyboardButton("🔍 جستجوی ویدیو در یوتیوب", "yt_search_menu")],
             [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]
         ])
-        await msg.edit_text(text, reply_markup=kb)
+        await safe_edit_or_send(client, chat_id, msg, text, kb)
         return
 
     if data == "yt_search_menu":
         USER_STATES[chat_id] = "AWAIT_YT_SEARCH"
-        await msg.edit_text(
+        await safe_edit_or_send(
+            client, chat_id, msg,
             "🔍 **نام ویدیو یا کلمه کلیدی مورد نظر را ارسال کنید:**",
-            reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_youtube")]])
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_youtube")]])
         )
         return
 
@@ -316,13 +783,27 @@ async def on_callback(client: Client, callback_query: CallbackQuery):
             "کافیست لینک ریلز، پست یا ویدیوی تیک‌تاک را مستقیماً برای ربات ارسال کنید تا بلافاصله دانلود و برای شما ارسال شود."
         )
         kb = InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]])
-        await msg.edit_text(text, reply_markup=kb)
+        await safe_edit_or_send(client, chat_id, msg, text, kb)
         return
 
     if data == "menu_reddit_twitter":
         text = "🐦 **ردیت و توییتر (X):**\n\nلینک پست مورد نظر را ارسال کنید."
         kb = InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]])
-        await msg.edit_text(text, reply_markup=kb)
+        await safe_edit_or_send(client, chat_id, msg, text, kb)
+        return
+
+    if data == "menu_vedit":
+        text = (
+            "🎬 **ابزارهای پیشرفته ویدیو:**\n\n"
+            "برای استفاده از امکانات ویدیو:\n"
+            "• استخراج صدای ویدیو به MP3\n"
+            "• تبدیل ویدیو به گیف (GIF)\n"
+            "• فشرده‌سازی هوشمند حجم بدون افت کیفیت\n"
+            "• برش بخش دلخواه از ویدیو\n\n"
+            "کافیست یک فایل ویدیویی به ربات ارسال فرمایید."
+        )
+        kb = InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]])
+        await safe_edit_or_send(client, chat_id, msg, text, kb)
         return
 
     if data in ["menu_music_spotify", "menu_music_sc", "menu_music_ytm"]:
@@ -334,47 +815,54 @@ async def on_callback(client: Client, callback_query: CallbackQuery):
             [InlineKeyboardButton("🔍 جستجوی نام آهنگ", "msearch_prompt")],
             [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]
         ])
-        await msg.edit_text(text, reply_markup=kb)
+        await safe_edit_or_send(client, chat_id, msg, text, kb)
         return
 
     if data == "msearch_prompt":
         USER_STATES[chat_id] = "AWAIT_MUSIC_SEARCH"
-        await msg.edit_text(
+        await safe_edit_or_send(
+            client, chat_id, msg,
             "🎵 **لطفاً نام آهنگ یا خواننده را ارسال کنید:**",
-            reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_main")]])
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_main")]])
         )
+        return
+
+    if data in ["menu_pinterest", "menu_pexels", "menu_google_images"]:
+        USER_STATES[chat_id] = "AWAIT_IMG_SEARCH"
+        text = "🔍 **کلمه کلیدی مورد نظر برای جستجوی تصویر را بنویسید:**"
+        kb = InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_main")]])
+        await safe_edit_or_send(client, chat_id, msg, text, kb)
+        return
+
+    if data == "menu_ai":
+        USER_STATES[chat_id] = "AWAIT_AI_QUERY"
+        text = (
+            "🤖 **دستیار هوش مصنوعی TMulti:**\n\n"
+            "سوال، ایده یا درخواست متنی خود را ارسال کنید:"
+        )
+        kb = InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_main")]])
+        await safe_edit_or_send(client, chat_id, msg, text, kb)
+        return
+
+    if data == "contact_admin":
+        text = (
+            "📩 **ارتباط با مدیریت و سازنده ربات:**\n\n"
+            "برای هرگونه سوال، پیشنهاد یا گزارش خطا:\n"
+            "👤 مدیر ربات: @TahatheGoat\n\n"
+            "همچنین می‌توانید پیام خود را در همین گفتگو تایپ کنید."
+        )
+        kb = InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]])
+        await safe_edit_or_send(client, chat_id, msg, text, kb)
         return
 
     if data == "menu_music_tools":
         kb = menus.get_music_tools_keyboard(chat_id, get_user_lang)
-        await msg.edit_text("🎵 **ابزارهای ویرایش صدا و موزیک:**", reply_markup=kb)
+        await safe_edit_or_send(client, chat_id, msg, "🎵 **ابزارهای ویرایش صدا و موزیک:**", kb)
         return
 
     if data == "menu_image_tools":
         kb = menus.get_image_tools_keyboard(chat_id, get_user_lang)
-        await msg.edit_text("🎨 **ابزارهای ویرایش تصویر:**", reply_markup=kb)
-        return
-
-    if data == "menu_settings":
-        kb = InlineKeyboard([
-            [InlineKeyboardButton("🇮🇷 فارسی", "set_lang_fa"), InlineKeyboardButton("🇬🇧 English", "set_lang_en")],
-            [InlineKeyboardButton("🔙 بازگشت", "menu_main")]
-        ])
-        await msg.edit_text("⚙️ **تنظیمات زبان ربات:**", reply_markup=kb)
-        return
-
-    if data.startswith("set_lang_"):
-        new_lang = data.split("_")[2]
-        set_user_lang(chat_id, new_lang)
-        confirm = "✅ زبان با موفقیت به فارسی تغییر کرد." if new_lang == "fa" else "✅ Language changed to English."
-        await msg.edit_text(confirm, reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 منوی اصلی", "menu_main")]]))
-        return
-
-    if data == "contact_admin":
-        await msg.edit_text(
-            "📩 **ارتباط با توسعه‌دهنده:**\n\nبرای پشتیبانی و ارسال پیشنهادات می‌توانید با تیم توسعه در تماس باشید.",
-            reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت", "menu_main")]])
-        )
+        await safe_edit_or_send(client, chat_id, msg, "🎨 **ابزارهای ویرایش تصویر:**", kb)
         return
 
     # --- Music Track Download Callback (dl_track_<id>) ---
@@ -410,8 +898,7 @@ async def on_callback(client: Client, callback_query: CallbackQuery):
                     chat_id,
                     audio=af,
                     caption=caption,
-                    title=track_meta["title"],
-                    performer=track_meta["artist"],
+                    title=f"{track_meta['artist']} - {track_meta['title']}",
                     duration=track_meta["duration"]
                 )
 
@@ -500,7 +987,6 @@ async def on_callback(client: Client, callback_query: CallbackQuery):
                     chat_id,
                     audio=af,
                     title=f"{probe.get('title','Track')} ({eff_label})",
-                    performer=probe.get("artist", "TahasBot Audio"),
                     duration=int(probe.get("duration", 0)),
                     caption=f"🎧 **{eff_label}**\n⚡️ پردازش شده توسط @tahasbot"
                 )
@@ -557,10 +1043,20 @@ async def on_message(client: Client, message: Message):
         return
     chat_id = message.chat.id
     text = (message.text or "").strip()
+    username = (message.author.username if message.author else "") or ""
+
+    # 0. Ban & Maintenance Checks
+    if is_user_banned(chat_id):
+        await client.send_message(chat_id, "⛔️ حساب کاربری شما توسط مدیریت مسدود شده است.")
+        return
+
+    if is_maintenance_mode() and not is_admin(chat_id, username):
+        await client.send_message(chat_id, "🛠 **ربات در حال به‌روزرسانی و ارتقای سرور است.**\nلطفاً دقایقی دیگر مراجعه فرمایید.")
+        return
 
     # 1. Check if user sent an Audio / Voice file
     if getattr(message, "audio", None) or getattr(message, "voice", None):
-        status_msg = await message.reply("⏳ در حال دریافت فایل صوتی...")
+        status_msg = await client.send_message(chat_id, "⏳ در حال دریافت فایل صوتی...")
         try:
             file_obj = getattr(message, "audio", None) or getattr(message, "voice", None)
             file_id = getattr(file_obj, "id", None) or getattr(file_obj, "file_id", None)
@@ -580,7 +1076,7 @@ async def on_message(client: Client, message: Message):
 
     # 2. Check if user sent a Photo
     if getattr(message, "photo", None):
-        status_msg = await message.reply("⏳ در حال دریافت تصویر...")
+        status_msg = await client.send_message(chat_id, "⏳ در حال دریافت تصویر...")
         try:
             photo = message.photo
             file_id = getattr(photo, "id", None) or getattr(photo, "file_id", None)
@@ -612,10 +1108,97 @@ async def on_message(client: Client, message: Message):
             return await cmd_help(client, message)
         elif cmd.startswith("/tool"):
             return await cmd_tool(client, message)
+        elif cmd.startswith("/profile"):
+            return await render_user_profile(client, chat_id, user_obj=message.author)
+        elif cmd.startswith("/admin") or cmd.startswith("/panel"):
+            return await cmd_admin(client, message)
         return
 
-
     state = USER_STATES.get(chat_id)
+
+    # Admin Text States
+    if state == "AWAIT_ADMIN_SEARCH" and is_admin(chat_id, username):
+        USER_STATES.pop(chat_id, None)
+        query_val = text.strip().lstrip("@")
+        doc = None
+        if query_val.isdigit():
+            doc = db.users.find_one({"chat_id": int(query_val)}) if db is not None else None
+        if not doc and db is not None:
+            doc = db.users.find_one({"username": {"$regex": f"^{re.escape(query_val)}$", "$options": "i"}})
+        if doc:
+            await render_admin_user_detail(client, chat_id, doc["chat_id"])
+        else:
+            await client.send_message(
+                chat_id,
+                f"❌ کاربر «{text}» در سامانه یافت نشد.",
+                reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به پنل", "adm_home")]])
+            )
+        return
+
+    if state == "AWAIT_BROADCAST" and is_admin(chat_id, username):
+        USER_STATES.pop(chat_id, None)
+        status_msg = await client.send_message(chat_id, "⏳ در حال ارسال پیام همگانی به تمام کاربران...")
+        success = 0
+        failed = 0
+        if db is not None:
+            for u in db.users.find({}, {"chat_id": 1}):
+                uid = u.get("chat_id")
+                if not uid or uid == chat_id:
+                    continue
+                try:
+                    await client.send_message(uid, f"📢 **پیام مدیریت:**\n\n{text}")
+                    success += 1
+                    await asyncio.sleep(0.05)
+                except Exception:
+                    failed += 1
+        await status_msg.edit_text(
+            f"📢 **ارسال همگانی پایان یافت:**\n\n"
+            f"✅ ارسال موفق: **{success}** کاربر\n"
+            f"❌ ناموفق: **{failed}**",
+            reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", "adm_home")]])
+        )
+        return
+
+    if state and state.startswith("AWAIT_ADMIN_PM_") and is_admin(chat_id, username):
+        target_id = int(state.replace("AWAIT_ADMIN_PM_", ""))
+        USER_STATES.pop(chat_id, None)
+        try:
+            await client.send_message(target_id, f"✉️ **پیام مستقیم از طرف مدیریت:**\n\n{text}")
+            await client.send_message(
+                chat_id,
+                f"✅ پیام شما برای کاربر `{target_id}` ارسال شد.",
+                reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت", f"adm_u_{target_id}")]])
+            )
+        except Exception as e:
+            await client.send_message(
+                chat_id,
+                f"❌ خطا در ارسال پیام: {e}",
+                reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت", f"adm_u_{target_id}")]])
+            )
+        return
+
+    # User Text States
+    if state == "AWAIT_AI_QUERY":
+        USER_STATES.pop(chat_id, None)
+        status_msg = await client.send_message(chat_id, "🤖 در حال پردازش توسط هوش مصنوعی...")
+        reply_txt = (
+            f"🧠 **پاسخ دستیار هوش مصنوعی TMulti:**\n\n"
+            f"درخواست شما برای «**{text}**» دریافت شد.\n\n"
+            f"ربات طه به صورت هوشمند برای دانلود و پردازش با کیفیت بالا از اینستاگرام، تیک‌تاک، یوتیوب، اسپاتیفای و ساندکلاد آماده است.\n"
+            f"برای دریافت هر آهنگ یا فایل رسانه‌ای، کافیست لینک آن یا نام اثر را ارسال کنید!"
+        )
+        await status_msg.edit_text(reply_txt, reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 منوی اصلی", "menu_main")]]))
+        log_activity(chat_id, "ai_query", text)
+        return
+
+    if state == "AWAIT_IMG_SEARCH":
+        USER_STATES.pop(chat_id, None)
+        await client.send_message(
+            chat_id,
+            f"🔍 در حال جستجوی تصاویر برای «{text}»...\nبرای دانلود دقیق‌تر می‌توانید لینک مستقیم پینترست یا اینستاگرام را بفرستید.",
+            reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 منوی اصلی", "menu_main")]])
+        )
+        return
 
     # 3. Handle state waiting for search input
     if state == "AWAIT_MUSIC_SEARCH":
@@ -715,8 +1298,7 @@ async def handle_spotify_link(client: Client, message: Message, url: str):
                 chat_id,
                 audio=af,
                 caption=caption,
-                title=top_track["title"],
-                performer=top_track["artist"],
+                title=f"{top_track['artist']} - {top_track['title']}",
                 duration=top_track["duration"]
             )
 

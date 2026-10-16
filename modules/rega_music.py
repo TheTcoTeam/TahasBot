@@ -338,20 +338,18 @@ def download_track_sync(track_meta: dict) -> tuple:
         if isrc:
             query = f'ytsearch1:"{isrc}"'
         else:
-            query = f"ytsearch1:{artist} - {title} official audio"
+            query = f"ytsearch1:{artist} - {title} audio"
         cmd = [
             sys.executable, "-m", "yt_dlp",
             "--no-playlist",
-            "-f", "ba[ext=m4a]/ba/b",
+            "-f", "ba/b",
             "-N", "4",
-            "--extractor-args", "youtube:player_client=android,web",
+            "--extractor-args", "youtube:player_client=android",
             "--no-check-certificates",
             "--buffer-size", "1024K",
-            "--output", f"{raw_prefix}.%(ext)s"
+            "--output", f"{raw_prefix}.%(ext)s",
+            query
         ]
-        if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
-            cmd.extend(["--cookies", "cookies.txt"])
-        cmd.append(query)
         res = subprocess.run(cmd, capture_output=True, timeout=120)
         return res
 
@@ -363,20 +361,18 @@ def download_track_sync(track_meta: dict) -> tuple:
     candidates = glob.glob(f"{raw_prefix}.*")
     if not candidates:
         # Fallback to general query if ISRC query produced nothing
-        query_fallback = f"ytsearch1:{artist} - {title} audio"
+        query_fallback = f"ytsearch1:{artist} - {title}"
         cmd = [
             sys.executable, "-m", "yt_dlp",
             "--no-playlist",
-            "-f", "ba[ext=m4a]/ba/b",
+            "-f", "ba/b",
             "-N", "4",
-            "--extractor-args", "youtube:player_client=android,web",
+            "--extractor-args", "youtube:player_client=android",
             "--no-check-certificates",
             "--buffer-size", "1024K",
-            "--output", f"{raw_prefix}.%(ext)s"
+            "--output", f"{raw_prefix}.%(ext)s",
+            query_fallback
         ]
-        if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
-            cmd.extend(["--cookies", "cookies.txt"])
-        cmd.append(query_fallback)
         subprocess.run(cmd, capture_output=True, timeout=120)
         candidates = glob.glob(f"{raw_prefix}.*")
 
