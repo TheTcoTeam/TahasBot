@@ -292,21 +292,14 @@ def main():
     ydl_meta_opts = {
         "quiet": True,
         "skip_download": True,
-        "getcomments": SEND_COMMENTS,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android"],
-                "max_comments": ["5", "all", "1"]
-            }
-        }
+        "getcomments": SEND_COMMENTS
     }
-    if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
-        try:
-            with open("cookies.txt", "r", encoding="utf-8", errors="ignore") as cf:
-                if "youtube.com" in cf.read():
-                    ydl_meta_opts["cookiefile"] = "cookies.txt"
-        except Exception:
-            pass
+    if "youtube.com" in URL or "youtu.be" in URL:
+        ydl_meta_opts["extractor_args"] = {
+            "youtubepot-bgutilhttp": {"base_url": "http://127.0.0.1:4416"}
+        }
+    elif os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
+        ydl_meta_opts["cookiefile"] = "cookies.txt"
 
     video_info = {}
     try:
@@ -367,7 +360,11 @@ def main():
             "subtitlesformat": "srt",
             "outtmpl": os.path.join(WORK_DIR, f"sub_%(id)s.%(ext)s")
         }
-        if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
+        if "youtube.com" in URL or "youtu.be" in URL:
+            sub_opts["extractor_args"] = {
+                "youtubepot-bgutilhttp": {"base_url": "http://127.0.0.1:4416"}
+            }
+        elif os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
             sub_opts["cookiefile"] = "cookies.txt"
         try:
             with yt_dlp.YoutubeDL(sub_opts) as ydl:
@@ -392,13 +389,13 @@ def main():
         "-o", out_template
     ]
 
-    if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
-        try:
-            with open("cookies.txt", "r", encoding="utf-8", errors="ignore") as cf:
-                if "youtube.com" in cf.read():
-                    cmd.extend(["--cookies", "cookies.txt"])
-        except Exception:
-            pass
+    if "youtube.com" in URL or "youtu.be" in URL:
+        cmd.extend([
+            "--js-runtimes", "deno",
+            "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
+        ])
+    elif os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
+        cmd.extend(["--cookies", "cookies.txt"])
 
     if FORMAT == "mp3" or "audio" in QUALITY:
         update_progress("📥 در حال دانلود ترک صوتی با بالاترین کیفیت (320kbps)...")
@@ -429,6 +426,28 @@ def main():
     cmd.append(URL)
     print("Executing download command:", " ".join(cmd), flush=True)
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+
+    # Automatic fallback if primary format failed
+    if res.returncode != 0:
+        print("Primary download failed. Attempting resilient fallback download...", flush=True)
+        fallback_cmd = [
+            sys.executable, "-m", "yt_dlp",
+            "--no-playlist",
+            "--no-check-certificates",
+            "-N", "4",
+            "-o", out_template
+        ]
+        if "youtube.com" in URL or "youtu.be" in URL:
+            fallback_cmd.extend([
+                "--js-runtimes", "deno",
+                "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
+            ])
+        if FORMAT == "mp3" or "audio" in QUALITY:
+            fallback_cmd.extend(["-f", "ba/b", "-x", "--audio-format", "mp3"])
+        else:
+            fallback_cmd.extend(["-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4"])
+        fallback_cmd.append(URL)
+        res = subprocess.run(fallback_cmd, capture_output=True, text=True, timeout=600)
 
     if res.returncode != 0:
         print("yt-dlp error:", res.stderr[-500:], flush=True)
