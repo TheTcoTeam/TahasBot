@@ -75,6 +75,8 @@ jobs:
         run: |
           sudo curl -sL https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest/download/bgutil-pot-linux-x86_64 -o /usr/local/bin/bgutil-pot
           sudo chmod +x /usr/local/bin/bgutil-pot
+          export DISABLE_INNERTUBE=true
+          export RUST_LOG=debug
           /usr/local/bin/bgutil-pot server --host 127.0.0.1 --port 4416 &
           SITE_DIR=$(python -c "import site; print(site.getsitepackages()[0])")
           curl -sL https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest/download/bgutil-ytdlp-pot-provider-rs.zip -o /tmp/plugin.zip
@@ -85,6 +87,7 @@ jobs:
           sleep 2
           curl -s http://127.0.0.1:4416/ping || true
           python -m yt_dlp --version
+          python -m yt_dlp -v --extractor-args "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416;disable_innertube=1" --extractor-args "youtube:player_client=web,mweb,android" --simulate "https://www.youtube.com/watch?v=jNQXAC9IVRw"
 
       - name: Execute Worker
         env:

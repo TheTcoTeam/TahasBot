@@ -295,10 +295,13 @@ def main():
         "getcomments": SEND_COMMENTS
     }
     if "youtube.com" in URL or "youtu.be" in URL:
-        ydl_meta_opts["js_runtimes"] = ["deno"]
+        ydl_meta_opts["js_runtimes"] = {"deno": {}}
         ydl_meta_opts["extractor_args"] = {
-            "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
-            "youtube": {"player_client": ["web", "mweb", "tvhtml5", "android"]}
+            "youtubepot-bgutilhttp": {
+                "base_url": ["http://127.0.0.1:4416"],
+                "disable_innertube": ["1"]
+            },
+            "youtube": {"player_client": ["web", "mweb", "android"]}
         }
     elif os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
         ydl_meta_opts["cookiefile"] = "cookies.txt"
@@ -363,10 +366,13 @@ def main():
             "outtmpl": os.path.join(WORK_DIR, f"sub_%(id)s.%(ext)s")
         }
         if "youtube.com" in URL or "youtu.be" in URL:
-            sub_opts["js_runtimes"] = ["deno"]
+            sub_opts["js_runtimes"] = {"deno": {}}
             sub_opts["extractor_args"] = {
-                "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
-                "youtube": {"player_client": ["web", "mweb", "tvhtml5", "android"]}
+                "youtubepot-bgutilhttp": {
+                    "base_url": ["http://127.0.0.1:4416"],
+                    "disable_innertube": ["1"]
+                },
+                "youtube": {"player_client": ["web", "mweb", "android"]}
             }
         elif os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
             sub_opts["cookiefile"] = "cookies.txt"
@@ -396,8 +402,8 @@ def main():
     if "youtube.com" in URL or "youtu.be" in URL:
         cmd.extend([
             "--js-runtimes", "deno",
-            "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
-            "--extractor-args", "youtube:player_client=web,mweb,tvhtml5,android,ios"
+            "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416;disable_innertube=1",
+            "--extractor-args", "youtube:player_client=web,mweb,android"
         ])
     elif os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
         cmd.extend(["--cookies", "cookies.txt"])
@@ -431,6 +437,11 @@ def main():
     cmd.append(URL)
     print("Executing download command:", " ".join(cmd), flush=True)
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    print("Primary returncode:", res.returncode, flush=True)
+    if res.stdout:
+        print("Primary stdout:", res.stdout[-600:], flush=True)
+    if res.stderr:
+        print("Primary stderr:", res.stderr[-600:], flush=True)
 
     # Automatic fallback if primary format failed
     if res.returncode != 0:
@@ -445,8 +456,8 @@ def main():
         if "youtube.com" in URL or "youtu.be" in URL:
             fallback_cmd.extend([
                 "--js-runtimes", "deno",
-                "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
-                "--extractor-args", "youtube:player_client=web,mweb,tvhtml5,android,ios"
+                "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416;disable_innertube=1",
+                "--extractor-args", "youtube:player_client=web,mweb,android"
             ])
         if FORMAT == "mp3" or "audio" in QUALITY:
             fallback_cmd.extend(["-f", "ba/b", "-x", "--audio-format", "mp3"])
@@ -454,6 +465,11 @@ def main():
             fallback_cmd.extend(["-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4"])
         fallback_cmd.append(URL)
         res = subprocess.run(fallback_cmd, capture_output=True, text=True, timeout=600)
+        print("Fallback returncode:", res.returncode, flush=True)
+        if res.stdout:
+            print("Fallback stdout:", res.stdout[-600:], flush=True)
+        if res.stderr:
+            print("Fallback stderr:", res.stderr[-600:], flush=True)
 
     if res.returncode != 0:
         print("yt-dlp error:", res.stderr[-500:], flush=True)
