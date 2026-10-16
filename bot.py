@@ -197,7 +197,7 @@ async def cmd_start(client: Client, message: Message):
     welcome_text = menus.get_menu_text("main_menu_welcome", lang=lang, name=name)
     kb = menus.get_main_keyboard(chat_id, get_user_lang)
 
-    await message.reply(welcome_text, reply_markup=kb)
+    await client.send_message(chat_id, welcome_text, reply_markup=kb)
 
 
 async def cmd_help(client: Client, message: Message):
@@ -237,7 +237,7 @@ async def cmd_help(client: Client, message: Message):
     kb = InlineKeyboard([
         [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]
     ])
-    await message.reply(help_text, reply_markup=kb)
+    await client.send_message(chat_id, help_text, reply_markup=kb)
 
 
 async def cmd_tool(client: Client, message: Message):
@@ -251,7 +251,7 @@ async def cmd_tool(client: Client, message: Message):
         "🎛 **Multimedia Toolbox:**\n"
         "Select a tool category or send an audio/image file:"
     )
-    await message.reply(text, reply_markup=kb)
+    await client.send_message(chat_id, text, reply_markup=kb)
 
 
 
@@ -844,33 +844,70 @@ async def handle_web_health(request):
     return web.json_response({"status": "ok"})
 
 
-async def handle_webhook(request):
+async def poll_bale_updates():
+    """Continuous resilient polling engine for Bale Messenger."""
+    print("Starting continuous Bale polling engine...", flush=True)
     try:
-        data = await request.json()
-        print(f"[BALE WEBHOOK] incoming payload: {data}", flush=True)
-        update = Update.wrap(data)
-        effective = update.get_effective_update()
-        if effective:
-            await bot.dispatcher.dispatch_event(bot, effective)
-        return web.Response(text="OK")
+        await bot.delete_webhook()
+        print("Deleted any existing webhook on Bale.", flush=True)
     except Exception as e:
-        print(f"[BALE WEBHOOK ERROR] {e}", flush=True)
-        traceback.print_exc()
-        return web.Response(text="OK")
+        print(f"delete_webhook error: {e}", flush=True)
+
+    last_update_id = None
+    session_timeout = aiohttp.ClientTimeout(total=50)
+
+    async with aiohttp.ClientSession(timeout=session_timeout) as session:
+        base_url = f"https://tapi.bale.ai/bot{BALE_BOT_TOKEN}"
+
+        while True:
+            try:
+                params = {"timeout": 20}
+                if last_update_id is not None:
+                    params["offset"] = last_update_id + 1
+
+                async with session.get(f"{base_url}/getUpdates", params=params) as response:
+                    if response.status != 200:
+                        await asyncio.sleep(2)
+                        continue
+
+                    data = await response.json()
+                    if not data.get("ok"):
+                        await asyncio.sleep(2)
+                        continue
+
+                    updates = data.get("result", [])
+                    for item in updates:
+                        up_id = item.get("update_id")
+                        if up_id is not None:
+                            last_update_id = up_id
+
+                        try:
+                            up_obj = Update.wrap(item)
+                            effective = up_obj.get_effective_update()
+                            if effective:
+                                effective.bind(bot)
+                                print(f"[BALE EVENT] id={up_id} type={type(effective).__name__}", flush=True)
+                                await bot.dispatcher.dispatch_event(bot, effective)
+                        except Exception as e:
+                            print(f"[DISPATCH ERROR] {e}", flush=True)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"[POLL LOOP ERROR] {e}", flush=True)
+                await asyncio.sleep(1)
 
 
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle_web_root)
     app.router.add_get("/health", handle_web_health)
-    app.router.add_post("/webhook", handle_webhook)
-    app.router.add_post("/webhook/", handle_webhook)
 
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print(f"Render HTTP Server listening on port {PORT} with /webhook enabled", flush=True)
+    print(f"Render HTTP Server listening on port {PORT}", flush=True)
 
 
 # ----------------- MAIN ENTRY POINT -----------------
@@ -883,7 +920,7 @@ async def main():
     loop = asyncio.get_running_loop()
     bot.dispatcher.event_loop = loop
 
-    # 1. Start web server for Render health checks and Webhook receiving
+    # 1. Start web server for Render health checks
     await start_web_server()
 
     # 2. Connect and initialize Balethon client
@@ -891,20 +928,9 @@ async def main():
     await bot.connect()
     await bot.initialize()
 
-    # 3. Ensure webhook is registered with Bale API
-    webhook_url = os.environ.get("WEBHOOK_URL", "https://tahasbot.onrender.com/webhook")
-    try:
-        print(f"Registering Bale webhook: {webhook_url}...", flush=True)
-        await bot.set_webhook(webhook_url)
-        print("Webhook successfully registered with Bale API!", flush=True)
-    except Exception as e:
-        print(f"Webhook setup warning: {e}", flush=True)
+    # 3. Start continuous polling engine
+    await poll_bale_updates()
 
-    print("TahasBot is fully active and processing webhook events!", flush=True)
-
-    # Keep server running
-    while True:
-        await asyncio.sleep(3600)
 
 
 
