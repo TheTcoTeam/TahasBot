@@ -24,8 +24,9 @@ import pymongo
 from balethon import Client
 from balethon.objects import (
     InlineKeyboard, InlineKeyboardButton,
-    Message, CallbackQuery
+    Message, CallbackQuery, Update
 )
+
 
 import modules.menus as menus
 import modules.rega_music as rega_music
@@ -843,16 +844,33 @@ async def handle_web_health(request):
     return web.json_response({"status": "ok"})
 
 
+async def handle_webhook(request):
+    try:
+        data = await request.json()
+        print(f"[BALE WEBHOOK] incoming payload: {data}", flush=True)
+        update = Update.wrap(data)
+        effective = update.get_effective_update()
+        if effective:
+            await bot.dispatcher.dispatch_event(bot, effective)
+        return web.Response(text="OK")
+    except Exception as e:
+        print(f"[BALE WEBHOOK ERROR] {e}", flush=True)
+        traceback.print_exc()
+        return web.Response(text="OK")
+
+
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle_web_root)
     app.router.add_get("/health", handle_web_health)
+    app.router.add_post("/webhook", handle_webhook)
+    app.router.add_post("/webhook/", handle_webhook)
 
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print(f"Render HTTP Server listening on port {PORT}", flush=True)
+    print(f"Render HTTP Server listening on port {PORT} with /webhook enabled", flush=True)
 
 
 # ----------------- MAIN ENTRY POINT -----------------
@@ -865,14 +883,29 @@ async def main():
     loop = asyncio.get_running_loop()
     bot.dispatcher.event_loop = loop
 
-    # 1. Start web server for Render health checks
+    # 1. Start web server for Render health checks and Webhook receiving
     await start_web_server()
 
-    # 2. Connect and run Balethon client
+    # 2. Connect and initialize Balethon client
     print("Connecting to Bale API...", flush=True)
     await bot.connect()
-    print("Connected successfully! Starting long polling...", flush=True)
-    await bot.start_polling()
+    await bot.initialize()
+
+    # 3. Ensure webhook is registered with Bale API
+    webhook_url = os.environ.get("WEBHOOK_URL", "https://tahasbot.onrender.com/webhook")
+    try:
+        print(f"Registering Bale webhook: {webhook_url}...", flush=True)
+        await bot.set_webhook(webhook_url)
+        print("Webhook successfully registered with Bale API!", flush=True)
+    except Exception as e:
+        print(f"Webhook setup warning: {e}", flush=True)
+
+    print("TahasBot is fully active and processing webhook events!", flush=True)
+
+    # Keep server running
+    while True:
+        await asyncio.sleep(3600)
+
 
 
 
