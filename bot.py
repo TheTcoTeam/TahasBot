@@ -882,36 +882,73 @@ def fetch_channel_latest_videos(channel_id: str, max_results: int = 8) -> list:
     return videos
 
 
-def fetch_video_details(video_url_or_id: str) -> dict:
+def fetch_video_details(video_url_or_id: str, cached_entry: dict = None) -> dict:
     if not video_url_or_id.startswith("http"):
         video_url = f"https://www.youtube.com/watch?v={video_url_or_id}"
+        v_id = video_url_or_id
     else:
         video_url = video_url_or_id
+        m = re.search(r'(?:v=|\/|youtu\.be\/)([a-zA-Z0-9_-]{11})', video_url_or_id)
+        v_id = m.group(1) if m else ""
 
-    ydl_opts = {
-        "quiet": True,
-        "skip_download": True,
-        "extractor_args": {"youtube": {"player_client": ["android"]}}
+    title = (cached_entry or {}).get("title")
+    uploader = (cached_entry or {}).get("uploader")
+    duration = (cached_entry or {}).get("duration") or 0
+    views = (cached_entry or {}).get("views") or 0
+    thumbnail = (cached_entry or {}).get("thumbnail") or (f"https://i.ytimg.com/vi/{v_id}/hqdefault.jpg" if v_id else "")
+    description = (cached_entry or {}).get("description") or ""
+
+    # If title or uploader missing, query YouTube oEmbed (instant, never blocked)
+    if not title or not uploader:
+        try:
+            r = requests.get(f"https://www.youtube.com/oembed?url={video_url}&format=json", timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                title = title or data.get("title")
+                uploader = uploader or data.get("author_name")
+                thumbnail = thumbnail or data.get("thumbnail_url")
+        except Exception:
+            pass
+
+    # Optional yt-dlp probe without cookies if duration is still 0
+    if not duration:
+        try:
+            ydl_opts = {
+                "quiet": True,
+                "skip_download": True,
+                "extract_flat": True,
+                "extractor_args": {"youtube": {"player_client": ["android"]}}
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(video_url, download=False)
+                if info:
+                    duration = info.get("duration") or duration
+                    views = info.get("view_count") or views
+                    if not title:
+                        title = info.get("title")
+                    if not uploader:
+                        uploader = info.get("uploader") or info.get("channel")
+        except Exception:
+            pass
+
+    title = title or "YouTube Video"
+    uploader = uploader or "YouTube"
+    duration = duration or 300
+    duration_str = format_duration(duration)
+    sizes = calculate_yt_sizes({"duration": duration, "formats": []})
+
+    return {
+        "url": f"https://www.youtube.com/watch?v={v_id}" if v_id else video_url,
+        "video_id": v_id,
+        "title": title,
+        "uploader": uploader,
+        "duration": duration,
+        "duration_str": duration_str,
+        "views": views,
+        "thumbnail": thumbnail,
+        "description": description[:500],
+        "sizes": sizes
     }
-    if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
-        ydl_opts["cookiefile"] = "cookies.txt"
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(video_url, download=False)
-        sizes = calculate_yt_sizes(info)
-        v_id = info.get("id") or ""
-        return {
-            "url": f"https://www.youtube.com/watch?v={v_id}" if v_id else video_url,
-            "video_id": v_id,
-            "title": info.get("title") or "YouTube Video",
-            "uploader": info.get("uploader") or info.get("channel") or "YouTube",
-            "duration": info.get("duration") or 0,
-            "duration_str": format_duration(info.get("duration") or 0),
-            "views": info.get("view_count") or 0,
-            "thumbnail": info.get("thumbnail") or "",
-            "description": (info.get("description") or "").strip()[:500],
-            "sizes": sizes
-        }
 
 
 async def render_yt_channels_page(client: Client, chat_id: int, page: int = 0, msg: Message = None):
@@ -1091,11 +1128,30 @@ async def render_yt_keyword_page(client: Client, chat_id: int, page: int = 0, ms
 
 
 async def render_yt_video_card(client: Client, chat_id: int, video_url_or_id: str, msg: Message = None):
+    data = USER_DATA.get(chat_id, {})
+    cached = None
+    v_clean = video_url_or_id
+    if "youtube.com" in video_url_or_id or "youtu.be" in video_url_or_id:
+        m = re.search(r'(?:v=|\/|youtu\.be\/)([a-zA-Z0-9_-]{11})', video_url_or_id)
+        if m:
+            v_clean = m.group(1)
+
+    for item in data.get("yt_kw_results", []):
+        if item.get("id") == v_clean:
+            cached = item
+            break
+    if not cached:
+        for item in data.get("yt_ch_videos", []):
+            if item.get("id") == v_clean:
+                cached = item
+                break
+
     status_msg = await safe_edit_or_send(client, chat_id, msg, "⏳ در حال دریافت مشخصات ویدیو و محاسبه حجم کیفیت‌ها...")
 
     try:
-        info = await asyncio.to_thread(fetch_video_details, video_url_or_id)
+        info = await asyncio.to_thread(fetch_video_details, video_url_or_id, cached)
     except Exception as e:
+        traceback.print_exc()
         await safe_edit_or_send(client, chat_id, status_msg, f"❌ خطا در استخراج اطلاعات ویدیو: {e}")
         return
 

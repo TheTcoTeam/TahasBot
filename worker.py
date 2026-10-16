@@ -301,7 +301,12 @@ def main():
         }
     }
     if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
-        ydl_meta_opts["cookiefile"] = "cookies.txt"
+        try:
+            with open("cookies.txt", "r", encoding="utf-8", errors="ignore") as cf:
+                if "youtube.com" in cf.read():
+                    ydl_meta_opts["cookiefile"] = "cookies.txt"
+        except Exception:
+            pass
 
     video_info = {}
     try:
@@ -388,7 +393,12 @@ def main():
     ]
 
     if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
-        cmd.extend(["--cookies", "cookies.txt"])
+        try:
+            with open("cookies.txt", "r", encoding="utf-8", errors="ignore") as cf:
+                if "youtube.com" in cf.read():
+                    cmd.extend(["--cookies", "cookies.txt"])
+        except Exception:
+            pass
 
     if FORMAT == "mp3" or "audio" in QUALITY:
         update_progress("📥 در حال دانلود ترک صوتی با بالاترین کیفیت (320kbps)...")
