@@ -41,10 +41,15 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y ffmpeg
 
+      - name: Install Deno (JavaScript Runtime for yt-dlp)
+        run: |
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
+
       - name: Install Python Dependencies
         run: |
           pip install --upgrade pip
-          pip install yt-dlp requests mutagen urllib3
+          pip install "yt-dlp[default]" requests mutagen urllib3
 
       - name: Execute Worker
         env:

@@ -186,15 +186,12 @@ def main():
         "--no-check-certificates",
         "-N", "4",
         "--buffer-size", "1024K",
-        "-o", out_template,
-        "--extractor-args", "youtube:player_client=ios,android"
+        "-o", out_template
     ]
 
-    # Note: ios and android YouTube clients do NOT support browser cookies.
-    # Only use cookies if not YouTube or if specifically needed.
-    if "youtube.com" not in URL and "youtu.be" not in URL:
-        if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
-            cmd.extend(["--cookies", "cookies.txt"])
+    if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
+        cmd.extend(["--cookies", "cookies.txt"])
+
 
 
     if FORMAT == "mp3" or "audio" in QUALITY:
