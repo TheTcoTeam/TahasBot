@@ -346,11 +346,10 @@ def download_track_sync(track_meta: dict, bitrate: str = "320k") -> tuple:
             "-N", "4",
             "--no-check-certificates",
             "--buffer-size", "1024K",
-            "--output", f"{raw_prefix}.%(ext)s"
+            "--extractor-args", "youtube:player_client=android",
+            "--output", f"{raw_prefix}.%(ext)s",
+            query
         ]
-        if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
-            cmd.extend(["--cookies", "cookies.txt"])
-        cmd.extend(["--extractor-args", "youtube:player_client=android,web", query])
         res = subprocess.run(cmd, capture_output=True, timeout=120)
         return res
 
@@ -361,7 +360,7 @@ def download_track_sync(track_meta: dict, bitrate: str = "320k") -> tuple:
 
     candidates = glob.glob(f"{raw_prefix}.*")
     if not candidates:
-        # Fallback to general query if ISRC query produced nothing
+        # Fallback to general query with android client
         query_fallback = f"ytsearch1:{artist} - {title}"
         cmd = [
             sys.executable, "-m", "yt_dlp",
@@ -370,11 +369,24 @@ def download_track_sync(track_meta: dict, bitrate: str = "320k") -> tuple:
             "-N", "4",
             "--no-check-certificates",
             "--buffer-size", "1024K",
-            "--output", f"{raw_prefix}.%(ext)s"
+            "--extractor-args", "youtube:player_client=android",
+            "--output", f"{raw_prefix}.%(ext)s",
+            query_fallback
         ]
-        if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
-            cmd.extend(["--cookies", "cookies.txt"])
-        cmd.extend(["--extractor-args", "youtube:player_client=android,web", query_fallback])
+        subprocess.run(cmd, capture_output=True, timeout=120)
+        candidates = glob.glob(f"{raw_prefix}.*")
+
+    if not candidates and os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
+        # Second fallback: cookies with web client
+        cmd = [
+            sys.executable, "-m", "yt_dlp",
+            "--no-playlist",
+            "-f", "ba/b",
+            "--cookies", "cookies.txt",
+            "--extractor-args", "youtube:player_client=web,mweb",
+            "--output", f"{raw_prefix}.%(ext)s",
+            f"ytsearch1:{artist} - {title}"
+        ]
         subprocess.run(cmd, capture_output=True, timeout=120)
         candidates = glob.glob(f"{raw_prefix}.*")
 
@@ -799,18 +811,26 @@ def download_ytm_track(video_id_or_url: str, title: str = "", artist: str = "", 
         "-f", "ba/b",
         "-N", "4",
         "--no-check-certificates",
-        "--output", f"{raw_prefix}.%(ext)s"
+        "--extractor-args", "youtube:player_client=android",
+        "--output", f"{raw_prefix}.%(ext)s",
+        url
     ]
-    if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
-        cmd.extend(["--cookies", "cookies.txt"])
-        cmd.extend(["--extractor-args", "youtube:player_client=android,web"])
-    else:
-        cmd.extend(["--extractor-args", "youtube:player_client=android"])
-    cmd.append(url)
-
     res = subprocess.run(cmd, capture_output=True, timeout=120)
     import glob
     candidates = glob.glob(f"{raw_prefix}.*")
+    if not candidates and os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
+        cmd_cookie = [
+            sys.executable, "-m", "yt_dlp",
+            "--no-playlist",
+            "-f", "ba/b",
+            "--cookies", "cookies.txt",
+            "--extractor-args", "youtube:player_client=web,mweb",
+            "--output", f"{raw_prefix}.%(ext)s",
+            url
+        ]
+        res = subprocess.run(cmd_cookie, capture_output=True, timeout=120)
+        candidates = glob.glob(f"{raw_prefix}.*")
+
     if not candidates:
         raise RuntimeError("YouTube Music download failed: " + (res.stderr.decode("utf-8", errors="ignore")[-200:] if res.stderr else "Unknown error"))
 

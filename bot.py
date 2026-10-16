@@ -14,6 +14,7 @@ import asyncio
 import traceback
 import subprocess
 import urllib.parse
+import math
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -124,6 +125,9 @@ def set_maintenance_mode(enabled: bool):
             pass
 
 
+_in_memory_settings = {}
+
+
 def get_video_slice_limit_mb() -> int:
     """Returns the maximum chunk size in MB for video slicing (default 25 MB)."""
     if db is not None:
@@ -133,11 +137,12 @@ def get_video_slice_limit_mb() -> int:
                 return int(doc["value"])
         except Exception as e:
             print(f"Error fetching video_slice_mb: {e}", flush=True)
-    return 25
+    return _in_memory_settings.get("video_slice_mb", 25)
 
 
 def set_video_slice_limit_mb(mb: int):
     """Sets the maximum chunk size in MB for video slicing."""
+    _in_memory_settings["video_slice_mb"] = int(mb)
     if db is not None:
         try:
             db.settings.update_one(
@@ -159,11 +164,12 @@ def is_playlist_locked(platform: str) -> bool:
                 return bool(doc["locked"])
         except Exception:
             pass
-    return True
+    return _in_memory_settings.get(f"lock_{platform}_playlists", True)
 
 
 def set_playlist_lock(platform: str, locked: bool):
     """Set playlist lock state for a given platform."""
+    _in_memory_settings[f"lock_{platform}_playlists"] = bool(locked)
     if db is not None:
         try:
             db.settings.update_one(
@@ -1753,7 +1759,9 @@ async def render_sc_tracks_page(client: Client, chat_id: int, page: int = 0, msg
     rows = []
     for idx, t in enumerate(page_trks, start=start_idx):
         dur = rega_music.format_duration(t.get("duration", 0))
-        btn_title = f"▶️ {idx + 1}. {t['title'][:25]} - {t['artist'][:15]} ({dur})"
+        t_title = t.get("title") or "آهنگ"
+        t_art = t.get("artist") or t.get("uploader") or "SoundCloud"
+        btn_title = f"▶️ {idx + 1}. {t_title[:25]} - {t_art[:15]} ({dur})"
         rows.append([InlineKeyboardButton(btn_title, f"sc_show_trk_{idx}")])
 
     nav_row = []
@@ -1779,13 +1787,15 @@ async def render_sc_track_card(client: Client, chat_id: int, track_idx: int, msg
 
     t = tracks[track_idx]
     USER_DATA.setdefault(chat_id, {})["sc_selected_track"] = t
+    t_title = t.get("title") or "آهنگ ساندکلاد"
+    t_art = t.get("artist") or t.get("uploader") or "هنرمند ساندکلاد"
     dur = rega_music.format_duration(t.get("duration", 0))
     views = f"{t.get('views', 0):,} بار" if t.get("views") else "مشخص‌نشده"
 
     text = (
         "☁️ **مشخصات ترک ساندکلاد:**\n\n"
-        f"🎧 عنوان: **{t['title']}**\n"
-        f"👤 ناشر / هنرمند: **{t['artist']}**\n"
+        f"🎧 عنوان: **{t_title}**\n"
+        f"👤 ناشر / هنرمند: **{t_art}**\n"
         f"⏱ مدت زمان: **{dur}**\n"
         f"▶️ پخش و بازدید: **{views}**\n\n"
         "کیفیت مورد نظر خود را برای دانلود انتخاب فرمایید:"
@@ -1953,8 +1963,10 @@ async def render_ytm_tracks_page(client: Client, chat_id: int, page: int = 0, ms
     rows = []
     for idx, t in enumerate(page_trks, start=start_idx + 1):
         dur = rega_music.format_duration(t.get("duration", 0))
-        btn_title = f"▶️ {idx}. {t['title'][:25]} - {t['artist'][:15]} ({dur})"
-        rows.append([InlineKeyboardButton(btn_title, f"ytm_show_trk_{t['id']}")])
+        t_title = t.get("title") or "YouTube Music Track"
+        t_art = t.get("artist") or t.get("channel") or "YouTube Music"
+        btn_title = f"▶️ {idx}. {t_title[:25]} - {t_art[:15]} ({dur})"
+        rows.append([InlineKeyboardButton(btn_title, f"ytm_show_trk_{t.get('id', idx)}")])
 
     nav_row = []
     if page > 0:
@@ -1978,12 +1990,14 @@ async def render_ytm_track_card(client: Client, chat_id: int, vid_id: str, msg: 
         t = {"id": vid_id, "title": "YouTube Music Track", "artist": "YouTube Music", "duration": 0, "thumb": f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg"}
 
     USER_DATA.setdefault(chat_id, {})["ytm_selected_track"] = t
+    t_title = t.get("title") or "YouTube Music Track"
+    t_art = t.get("artist") or t.get("channel") or "YouTube Music"
     dur = rega_music.format_duration(t.get("duration", 0))
 
     text = (
         "🔴 **مشخصات ترک صوتی یوتیوب موزیک:**\n\n"
-        f"🎧 عنوان: **{t['title']}**\n"
-        f"👤 کانال / هنرمند: **{t['artist']}**\n"
+        f"🎧 عنوان: **{t_title}**\n"
+        f"👤 کانال / هنرمند: **{t_art}**\n"
         f"⏱ مدت زمان: **{dur}**\n\n"
         "کیفیت مورد نظر خود را برای دانلود انتخاب فرمایید:"
     )
