@@ -190,8 +190,12 @@ def main():
         "--extractor-args", "youtube:player_client=ios,android"
     ]
 
-    if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
-        cmd.extend(["--cookies", "cookies.txt"])
+    # Note: ios and android YouTube clients do NOT support browser cookies.
+    # Only use cookies if not YouTube or if specifically needed.
+    if "youtube.com" not in URL and "youtu.be" not in URL:
+        if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
+            cmd.extend(["--cookies", "cookies.txt"])
+
 
     if FORMAT == "mp3" or "audio" in QUALITY:
         # Download best audio and convert to 320k MP3
