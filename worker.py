@@ -294,14 +294,15 @@ def main():
         "skip_download": True,
         "getcomments": SEND_COMMENTS
     }
+    if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
+        ydl_meta_opts["cookiefile"] = "cookies.txt"
+
     if "youtube.com" in URL or "youtu.be" in URL:
         ydl_meta_opts["js_runtimes"] = {"deno": {}}
         ydl_meta_opts["extractor_args"] = {
             "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
             "youtube": {"player_client": ["web", "mweb", "android"]}
         }
-    elif os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
-        ydl_meta_opts["cookiefile"] = "cookies.txt"
 
     video_info = {}
     try:
@@ -362,14 +363,14 @@ def main():
             "subtitlesformat": "srt",
             "outtmpl": os.path.join(WORK_DIR, f"sub_%(id)s.%(ext)s")
         }
+        if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
+            sub_opts["cookiefile"] = "cookies.txt"
         if "youtube.com" in URL or "youtu.be" in URL:
             sub_opts["js_runtimes"] = {"deno": {}}
             sub_opts["extractor_args"] = {
                 "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
                 "youtube": {"player_client": ["web", "mweb", "android"]}
             }
-        elif os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
-            sub_opts["cookiefile"] = "cookies.txt"
         try:
             with yt_dlp.YoutubeDL(sub_opts) as ydl:
                 ydl.download([URL])
@@ -393,14 +394,15 @@ def main():
         "-o", out_template
     ]
 
+    if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
+        cmd.extend(["--cookies", "cookies.txt"])
+
     if "youtube.com" in URL or "youtu.be" in URL:
         cmd.extend([
             "--js-runtimes", "deno",
             "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
             "--extractor-args", "youtube:player_client=web,mweb,android"
         ])
-    elif os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
-        cmd.extend(["--cookies", "cookies.txt"])
 
     if FORMAT == "mp3" or "audio" in QUALITY:
         update_progress("📥 در حال دانلود ترک صوتی با بالاترین کیفیت (320kbps)...")
@@ -447,6 +449,8 @@ def main():
             "-N", "4",
             "-o", out_template
         ]
+        if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
+            fallback_cmd.extend(["--cookies", "cookies.txt"])
         if "youtube.com" in URL or "youtu.be" in URL:
             fallback_cmd.extend([
                 "--js-runtimes", "deno",

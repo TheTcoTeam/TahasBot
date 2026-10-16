@@ -78,7 +78,6 @@ jobs:
           pip install --upgrade pip
           pip install "yt-dlp[default,curl-cffi]" bgutil-ytdlp-pot-provider requests mutagen urllib3
           python -m yt_dlp --version
-          python -m yt_dlp -v --extractor-args "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416" --simulate "https://www.youtube.com/watch?v=jNQXAC9IVRw"
 
       - name: Execute Worker
         env:
