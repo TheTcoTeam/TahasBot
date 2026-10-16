@@ -182,7 +182,6 @@ def download_social_media_sync(url: str, prefix: str = "media") -> dict:
 
 
 # ----------------- BOT COMMAND HANDLERS -----------------
-@bot.on_command("start")
 async def cmd_start(client: Client, message: Message):
     chat_id = message.chat.id
     user_info = {
@@ -200,7 +199,6 @@ async def cmd_start(client: Client, message: Message):
     await message.reply(welcome_text, reply_markup=kb)
 
 
-@bot.on_command("help")
 async def cmd_help(client: Client, message: Message):
     chat_id = message.chat.id
     lang = get_user_lang(chat_id)
@@ -241,7 +239,6 @@ async def cmd_help(client: Client, message: Message):
     await message.reply(help_text, reply_markup=kb)
 
 
-@bot.on_command("tool")
 async def cmd_tool(client: Client, message: Message):
     chat_id = message.chat.id
     lang = get_user_lang(chat_id)
@@ -256,19 +253,17 @@ async def cmd_tool(client: Client, message: Message):
     await message.reply(text, reply_markup=kb)
 
 
-@bot.on_command("tools")
-async def cmd_tools(client: Client, message: Message):
-    await cmd_tool(client, message)
-
 
 
 # ----------------- CALLBACK QUERY HANDLER -----------------
 @bot.on_callback_query()
-async def on_callback(client: Client, query: CallbackQuery):
+async def on_callback(client: Client, callback_query: CallbackQuery):
+    query = callback_query
     chat_id = query.message.chat.id
     data = query.data
     lang = get_user_lang(chat_id)
     msg = query.message
+
 
     try:
         await query.answer()
@@ -605,9 +600,19 @@ async def on_message(client: Client, message: Message):
     if not text:
         return
 
-    # Ignore slash commands already routed
+    print(f"[BALE INCOMING] chat_id={chat_id} text={text[:60]}", flush=True)
+
+    # Route slash commands directly
     if text.startswith("/"):
+        cmd = text.split()[0].lower()
+        if cmd.startswith("/start"):
+            return await cmd_start(client, message)
+        elif cmd.startswith("/help"):
+            return await cmd_help(client, message)
+        elif cmd.startswith("/tool"):
+            return await cmd_tool(client, message)
         return
+
 
     state = USER_STATES.get(chat_id)
 
@@ -856,6 +861,10 @@ async def main():
     print(" Starting TahasBot for Bale Messenger   ", flush=True)
     print("========================================", flush=True)
 
+    # Bind Balethon dispatcher to active running loop
+    loop = asyncio.get_running_loop()
+    bot.dispatcher.event_loop = loop
+
     # 1. Start web server for Render health checks
     await start_web_server()
 
@@ -864,6 +873,7 @@ async def main():
     await bot.connect()
     print("Connected successfully! Starting long polling...", flush=True)
     await bot.start_polling()
+
 
 
 if __name__ == "__main__":
