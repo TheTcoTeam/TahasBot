@@ -314,7 +314,10 @@ def download_track_sync(track_meta: dict, bitrate: str = "320k") -> tuple:
     thumb_url = track_meta.get("thumb", "")
     isrc = track_meta.get("isrc", "")
 
-    safe_name = re.sub(r'[\\/*?:"<>|]', "", f"{artist} - {title}")[:60].strip() or "track"
+    clean_title = re.sub(r'\(.*?\)|\[.*?\]', '', title).strip() or title
+    clean_artist = re.sub(r'\(.*?\)|\[.*?\]', '', artist).strip() or artist
+
+    safe_name = re.sub(r'[\\/*?:"<>|]', "", f"{clean_artist} - {clean_title}")[:60].strip() or "track"
     ts = int(time.time() * 1000)
     raw_prefix = os.path.join(MUSIC_DIR, f"{safe_name}_{ts}_raw")
     final_audio_path = os.path.join(MUSIC_DIR, f"{safe_name}_{ts}.mp3")
@@ -334,11 +337,10 @@ def download_track_sync(track_meta: dict, bitrate: str = "320k") -> tuple:
         return None
 
     def _dl_audio():
-        # Prefer exact ISRC if present (matches official track in 1s)
         if isrc:
-            query = f'ytsearch1:"{isrc}"'
+            query = f'ytsearch1:{isrc}'
         else:
-            query = f"ytsearch1:{artist} - {title} audio"
+            query = f"ytsearch1:{clean_artist} {clean_title} official audio"
         cmd = [
             sys.executable, "-m", "yt_dlp",
             "--no-playlist",
@@ -360,8 +362,8 @@ def download_track_sync(track_meta: dict, bitrate: str = "320k") -> tuple:
 
     candidates = glob.glob(f"{raw_prefix}.*")
     if not candidates:
-        # Fallback to general query with android client
-        query_fallback = f"ytsearch1:{artist} - {title}"
+        # Fallback 1: YouTube general search with android client
+        query_fallback = f"ytsearch1:{clean_artist} {clean_title} audio"
         cmd = [
             sys.executable, "-m", "yt_dlp",
             "--no-playlist",
@@ -377,7 +379,7 @@ def download_track_sync(track_meta: dict, bitrate: str = "320k") -> tuple:
         candidates = glob.glob(f"{raw_prefix}.*")
 
     if not candidates and os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
-        # Second fallback: cookies with web client
+        # Fallback 2: YouTube with cookies & web/mweb client
         cmd = [
             sys.executable, "-m", "yt_dlp",
             "--no-playlist",
@@ -385,10 +387,46 @@ def download_track_sync(track_meta: dict, bitrate: str = "320k") -> tuple:
             "--cookies", "cookies.txt",
             "--extractor-args", "youtube:player_client=web,mweb",
             "--output", f"{raw_prefix}.%(ext)s",
-            f"ytsearch1:{artist} - {title}"
+            f"ytsearch1:{clean_artist} {clean_title}"
         ]
         subprocess.run(cmd, capture_output=True, timeout=120)
         candidates = glob.glob(f"{raw_prefix}.*")
+
+    if not candidates:
+        # Fallback 3: SoundCloud search and download (100% available on all datacenters)
+        print(f"YouTube search yielded no candidates for {artist} - {title}. Falling back to SoundCloud...", flush=True)
+        try:
+            sc_results = search_soundcloud_tracks(f"{clean_artist} {clean_title}", limit=3)
+            for sc_item in sc_results:
+                sc_url = sc_item.get("url")
+                if sc_url:
+                    sc_cmd = [
+                        sys.executable, "-m", "yt_dlp",
+                        "--no-playlist",
+                        "-f", "bestaudio/best",
+                        "--output", f"{raw_prefix}.%(ext)s",
+                        sc_url
+                    ]
+                    sc_res = subprocess.run(sc_cmd, capture_output=True, timeout=60)
+                    candidates = glob.glob(f"{raw_prefix}.*")
+                    if candidates:
+                        print(f"SoundCloud fallback succeeded for {artist} - {title}!", flush=True)
+                        break
+        except Exception as sc_err:
+            print(f"SoundCloud fallback error: {sc_err}", flush=True)
+
+    if not candidates and track_meta.get("preview"):
+        # Fallback 4: Deezer preview stream
+        print(f"Using Deezer preview stream for {artist} - {title}...", flush=True)
+        try:
+            pr = requests.get(track_meta["preview"], timeout=10)
+            if pr.status_code == 200:
+                raw_preview_path = f"{raw_prefix}.mp3"
+                with open(raw_preview_path, "wb") as pf:
+                    pf.write(pr.content)
+                candidates = [raw_preview_path]
+        except Exception as pr_err:
+            print(f"Preview fallback error: {pr_err}", flush=True)
 
     if not candidates:
         raise RuntimeError(f"Download failed for {artist} - {title}")
