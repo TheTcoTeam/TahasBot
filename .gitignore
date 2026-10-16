@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*$py.class
+music_downloads/*
+!music_downloads/.gitkeep
+media_downloads/*
+!media_downloads/.gitkeep
+downloads/*
+!downloads/.gitkeep
+jobs/*
+!jobs/.gitkeep
+.env
+.venv/
+env/
+venv/
+*.log

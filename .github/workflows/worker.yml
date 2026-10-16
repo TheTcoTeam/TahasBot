@@ -1,0 +1,59 @@
+name: Bale Heavy Downloader Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Target Video/Audio URL'
+        required: true
+      chat_id:
+        description: 'Bale Chat ID'
+        required: true
+      message_id:
+        description: 'Bale Progress Message ID'
+        required: false
+        default: '0'
+      format:
+        description: 'Format (mp4, mp3)'
+        required: false
+        default: 'mp4'
+      quality:
+        description: 'Video Quality (720p, 480p, 360p)'
+        required: false
+        default: '720p'
+
+jobs:
+  run-worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install System Dependencies (FFmpeg)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install yt-dlp requests mutagen urllib3
+
+      - name: Execute Worker
+        env:
+          BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+          YT_URL: ${{ github.event.inputs.url }}
+          CHAT_ID: ${{ github.event.inputs.chat_id }}
+          MESSAGE_ID: ${{ github.event.inputs.message_id }}
+          YT_FORMAT: ${{ github.event.inputs.format }}
+          YT_QUALITY: ${{ github.event.inputs.quality }}
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+        run: |
+          python worker.py
