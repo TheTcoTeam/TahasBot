@@ -3585,11 +3585,40 @@ def track_kb_for(doc_or_key, chat_id, extra_rows=None):
     return kb
 
 
+def _cover_url(meta: dict, doc: dict = None) -> str:
+    url = (meta or {}).get("cover") or (doc or {}).get("cover") or ""
+    yt = (meta or {}).get("yt_id") or ""
+    if not url and re.fullmatch(r"[0-9A-Za-z_-]{11}", yt):
+        url = f"https://i.ytimg.com/vi/{yt}/hqdefault.jpg"
+    return url if str(url).startswith("http") else ""
+
+
+async def send_cover_card(client: Client, chat_id: int, meta: dict, doc: dict = None):
+    """Bale's bot API cannot attach artwork to an audio message (it drops the
+    thumbnail field), so the cover is shown as a photo card right above the
+    song. The file itself still has the cover embedded for local players."""
+    if not get_settings().get("cover_card", True):
+        return
+    url = _cover_url(meta, doc)
+    if not url:
+        return
+    title = (meta or {}).get("title") or (doc or {}).get("title") or ""
+    artist = (meta or {}).get("artist") or (doc or {}).get("artist") or ""
+    album = (meta or {}).get("album") or (doc or {}).get("album") or ""
+    cap = f"🎵 **{title}**" + (f"\n👤 {artist}" if artist else "") + (f"\n💿 {album}" if album else "")
+    try:
+        await client.send_photo(chat_id, url, caption=cap)
+    except Exception as e:
+        print(f"cover card failed: {e}", flush=True)
+
+
 async def deliver_track(client: Client, chat_id: int, meta: dict, status=None,
                         extra_rows=None, activity: str = "music", report_failure: bool = True) -> bool:
     """Cached -> sent instantly. Otherwise a "⏳ downloading «song»" message is
     shown, the song is built, the message is deleted and the audio is sent."""
     doc = await asyncio.to_thread(cache_find, meta)
+    if doc:
+        await send_cover_card(client, chat_id, meta, doc)
     if doc and await send_cached_doc(client, chat_id, doc, track_kb_for(doc, chat_id, extra_rows)):
         if status is not None:
             try:
@@ -3604,6 +3633,8 @@ async def deliver_track(client: Client, chat_id: int, meta: dict, status=None,
     status = await _show_status(client, chat_id, status, t(chat_id, "track_downloading", track=label))
     try:
         doc = await obtain_track(meta, upload_chat=chat_id)
+        if doc and not doc.get("_sent_msg"):
+            await send_cover_card(client, chat_id, meta, doc)
         sent_here = doc.pop("_sent_msg", None) if isinstance(doc, dict) else None
         if sent_here is not None:
             try:
@@ -5939,6 +5970,10 @@ async def download_album(client: Client, chat_id: int, status: Message, album: d
     except Exception:
         pass
 
+    if album.get("cover") or (collected and collected[0].get("cover")):
+        await send_cover_card(client, chat_id, {
+            "title": alb_name or album.get("name") or "", "artist": album.get("artist") or "",
+            "cover": album.get("cover") or collected[0].get("cover")})
     pending = [d for d in collected if not d.get("_delivered")]
     for batch_start in range(0, len(pending), 10):
         batch = pending[batch_start:batch_start + 10]
@@ -11919,6 +11954,8 @@ async def render_admin_limits(msg: Message):
          InlineKeyboardButton("۲۰", callback_data="adm_limset_20"), InlineKeyboardButton("۵۰", callback_data="adm_limset_50")],
         [InlineKeyboardButton("✍️ امضا: خاموش کن" if sig_on else "✍️ امضا: روشن کن", callback_data="adm_sigtoggle"),
          InlineKeyboardButton("📝 متن امضا", callback_data="adm_sigtext")],
+        [InlineKeyboardButton("🖼 کارت کاور آهنگ: خاموش کن" if st.get("cover_card", True) else "🖼 کارت کاور آهنگ: روشن کن",
+                              callback_data="adm_covertoggle")],
         [InlineKeyboardButton("♻️ تشخیص دوباره کانال کش", callback_data="adm_cachereset")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="adm_home")],
     ]
@@ -12017,6 +12054,9 @@ async def handle_bale_admin_callback(client: Client, query: CallbackQuery, data:
     elif data == "adm_sigtoggle":
         set_setting("signature_on", not get_settings().get("signature_on", True))
         apply_runtime_settings()
+        await render_admin_limits(msg)
+    elif data == "adm_covertoggle":
+        set_setting("cover_card", not get_settings().get("cover_card", True))
         await render_admin_limits(msg)
     elif data == "adm_sigtext":
         user_states[chat_id] = "ADMIN_SIGTEXT"
