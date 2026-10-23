@@ -193,7 +193,7 @@ def selftest():
                "pinterest_search_sync", "reddit_resolve_post_sync", "reddit_search_sync", "twitter_fetch_sync",
                "pexels_search_sync", "lrclib_lookup", "enrich_meta_sync", "resolve_youtube_id_sync",
                "selftest_music_timing", "download_url_to_file_sync", "instagram_embed_sync", "download_generic_sync",
-               "wikimedia_search_sync", "fetch_full_image_sync", "instagram_embed_probe"}
+               "wikimedia_search_sync", "fetch_full_image_sync", "instagram_embed_probe", "yt_client_timing"}
     if fn_name not in allowed:
         return jsonify({"error": "fn not allowed", "allowed": sorted(allowed)}), 400
     args = json.loads(request.args.get("args", "[]"))
@@ -3411,6 +3411,33 @@ def selftest_music_timing(yt_id: str = "JGwWNGJdvx8") -> dict:
             os.remove(p)
         except OSError:
             pass
+    return out
+
+
+def yt_client_timing(yt_id: str = "JGwWNGJdvx8") -> dict:
+    """/_selftest: extraction time per YouTube client on this host."""
+    url = f"https://www.youtube.com/watch?v={yt_id}"
+    out = {}
+    variants = {
+        "current": {},
+        "web_music": {"player_client": ["web_music"]},
+        "tv": {"player_client": ["tv"]},
+        "tv_simply": {"player_client": ["tv_simply"]},
+        "mweb": {"player_client": ["mweb"]},
+        "android_vr": {"player_client": ["android_vr"]},
+        "web_safari": {"player_client": ["web_safari"]},
+    }
+    for name, extra in variants.items():
+        opts = _yt_dl_opts("music_downloads/probe.%(ext)s")
+        if extra:
+            opts["extractor_args"] = {"youtube": {**opts["extractor_args"].get("youtube", {}), **extra}}
+        t0 = time.time()
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            out[name] = f"ok {time.time() - t0:.1f}s fmt={info.get('format_id')}"
+        except Exception as e:
+            out[name] = f"fail {time.time() - t0:.1f}s {str(e)[:60]}"
     return out
 
 
