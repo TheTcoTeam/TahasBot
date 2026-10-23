@@ -3460,8 +3460,14 @@ async def obtain_track(meta: dict, upload_chat=None) -> dict:
                 media = sent.audio or sent.document
                 if media is None:
                     raise RuntimeError("upload returned no audio")
-                return await asyncio.to_thread(store_track_doc, meta, media.file_id,
-                                               sent.id if target != upload_chat else None, duration)
+                doc = await asyncio.to_thread(store_track_doc, meta, media.file_id,
+                                              sent.id if target != upload_chat else None, duration)
+                if target == upload_chat:
+                    # No cache channel: the user already has this upload, so the
+                    # caller should decorate it rather than send the song again.
+                    doc = dict(doc or {})
+                    doc["_sent_msg"] = sent
+                return doc
             finally:
                 for p in (raw, mp3, thumb):
                     if p and os.path.exists(p):
@@ -3540,7 +3546,15 @@ async def deliver_track(client: Client, chat_id: int, meta: dict, status=None,
     status = await _show_status(client, chat_id, status, t(chat_id, "track_downloading", track=label))
     try:
         doc = await obtain_track(meta, upload_chat=chat_id)
-        ok = await send_cached_doc(client, chat_id, doc, track_kb_for(doc, chat_id, extra_rows))
+        sent_here = doc.pop("_sent_msg", None) if isinstance(doc, dict) else None
+        if sent_here is not None:
+            try:
+                await sent_here.edit_reply_markup(track_kb_for(doc, chat_id, extra_rows))
+            except Exception as e:
+                print(f"could not attach track keyboard: {e}", flush=True)
+            ok = True
+        else:
+            ok = await send_cached_doc(client, chat_id, doc, track_kb_for(doc, chat_id, extra_rows))
         if not ok:
             raise RuntimeError("delivery of fresh upload failed")
     except Exception as e:
@@ -3659,6 +3673,41 @@ async def process_instagram_render(client: Client, chat_id: int, msg: Message, u
         except Exception:
             await client.send_message(chat_id, t(chat_id, "ig_post_fetch_failed"))
 
+def _tiktok_via_tikwm(url: str):
+    r = requests.post("https://www.tikwm.com/api/", data={"url": url, "hd": 1}, timeout=30,
+                      headers={"User-Agent": "Mozilla/5.0"})
+    j = r.json()
+    d = j.get("data") or {}
+    if j.get("code") != 0 or not d:
+        raise RuntimeError(f"tikwm: {j.get('msg')}")
+
+    def absu(u):
+        return u if not u or u.startswith("http") else "https://www.tikwm.com" + u
+    os.makedirs("media_downloads", exist_ok=True)
+    stamp = f"{int(time.time() * 1000)}_{random.randint(100, 999)}"
+    files = []
+    images = d.get("images") or []
+    if images:
+        for i, u in enumerate(images[:20]):
+            p = f"media_downloads/tt_{stamp}_{i}.jpg"
+            download_url_to_file_sync(absu(u), p)
+            files.append(p)
+    else:
+        # hdplay can exceed Bale's 50 MB cap; fall back to the normal stream.
+        for key in ("hdplay", "play", "wmplay"):
+            u = absu(d.get(key) or "")
+            if not u:
+                continue
+            p = f"media_downloads/tt_{stamp}.mp4"
+            download_url_to_file_sync(u, p)
+            if os.path.getsize(p) <= 49 * 1024 * 1024 or key == "wmplay":
+                files.append(p)
+                break
+            os.remove(p)
+    caption = d.get("title") or ""
+    return {"files": files, "caption": caption[:3900]}
+
+
 def download_tiktok_native_sync(target: str):
     """Downloads TikTok videos directly on Render."""
     if not target.startswith("http"):
@@ -3681,7 +3730,15 @@ def download_tiktok_native_sync(target: str):
         **extra
     }
 
-    info = extract_post_info(opts, url, "tiktok")
+    try:
+        info = extract_post_info(opts, url, "tiktok")
+    except Exception as e:
+        # TikTok blocks many datacenter IPs (Render included); tikwm.com fetches
+        # the post for us. Only direct video/photo links can go this way.
+        if not target.startswith("http"):
+            raise
+        print(f"tiktok yt-dlp failed ({str(e)[:120]}); trying tikwm", flush=True)
+        return _tiktok_via_tikwm(url)
 
     media_files = assemble_post_media(info, "media_downloads/tt_")
     caption = info.get('description') or info.get('title') or ""
@@ -5633,6 +5690,8 @@ async def download_album(client: Client, chat_id: int, status: Message, album: d
         try:
             doc = await obtain_track(meta, upload_chat=chat_id)
             if doc_file_id(doc):
+                if doc.pop("_sent_msg", None) is not None:
+                    doc["_delivered"] = True  # no cache channel: already in the chat
                 collected.append(doc)
             else:
                 skipped.append(name)
@@ -5651,8 +5710,9 @@ async def download_album(client: Client, chat_id: int, status: Message, album: d
     except Exception:
         pass
 
-    for batch_start in range(0, len(collected), 10):
-        batch = collected[batch_start:batch_start + 10]
+    pending = [d for d in collected if not d.get("_delivered")]
+    for batch_start in range(0, len(pending), 10):
+        batch = pending[batch_start:batch_start + 10]
         try:
             await client.send_media_group(chat_id, [InputMediaAudio(doc_file_id(d)) for d in batch])
         except Exception as e:
@@ -8605,14 +8665,26 @@ async def chosen_inline_handler(client: Client, cir: ChosenInlineResult):
     try:
         if not meta:
             raise RuntimeError("track metadata unavailable")
-        doc = await obtain_track(meta)
+        # Bale build: inline picks are emulated in a chat ("bale:<chat>:<msg>"),
+        # which doubles as the upload target when there is no cache channel.
+        pick_chat = int(imid.split(":")[1]) if imid and str(imid).startswith("bale:") else uid
+        doc = await obtain_track(meta, upload_chat=pick_chat)
+        sent_here = doc.pop("_sent_msg", None) if isinstance(doc, dict) else None
         fid = doc_file_id(doc)
         if not fid:
             raise RuntimeError("no file id after upload")
         if uid:
             log_activity(uid, "music_inline", label)
             log_history(uid, doc.get("vid_id"), doc.get("title"), doc.get("artist"))
-        if imid:
+        if sent_here is not None:
+            try:
+                await sent_here.edit_reply_markup(_go_to_bot_kb(doc, bot_username))
+            except Exception:
+                pass
+            if imid and str(imid).startswith("bale:"):
+                _c, _m = imid.split(":")[1:3]
+                await client.delete_messages(int(_c), int(_m))
+        elif imid:
             await client.edit_inline_media(imid, InputMediaAudio(fid), reply_markup=_go_to_bot_kb(doc, bot_username))
     except Exception as e:
         print(f"inline delivery failed for {rid}: {e}\n{traceback.format_exc()[-800:]}", flush=True)
