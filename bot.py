@@ -3425,8 +3425,11 @@ def yt_client_timing(yt_id: str = "JGwWNGJdvx8") -> dict:
         "no_pot_again": {"fetch_pot": ["never"], "getpot_bgutil_baseurl": ["http://127.0.0.1:1"]},
         "web_music": {"player_client": ["web_music"]},
     }
+    variants = {"deno": {}, "node": {"_rt": "node"}, "node_again": {"_rt": "node"}}
     for name, extra in variants.items():
         opts = _yt_dl_opts("music_downloads/probe.%(ext)s")
+        if extra.pop("_rt", None) == "node":
+            opts["js_runtimes"] = {"node": {}}
         if extra:
             opts["extractor_args"] = {"youtube": {**opts["extractor_args"].get("youtube", {}), **extra}}
         t0 = time.time()
