@@ -195,14 +195,21 @@ def translate_cues(cues, source_lang):
     for i in range(0, len(cues), batch_size):
         batch = cues[i:i + batch_size]
         texts = [c[2] for c in batch]
-        try:
-            translated = translator.translate_batch(texts)
-        except Exception as e:
-            log(f"batch {i} translation failed ({e}); keeping original")
-            translated = texts
-        for (start, end, original), new in zip(batch, translated):
-            out.append((start, end, (new or original).strip()))
-        time.sleep(0.5)  # stay under the free endpoint's rate limit
+        translated = []
+        # translate_batch fires one request per line back to back and trips the
+        # free endpoint's 5 req/s limit; go line by line, backing off on errors.
+        for text in texts:
+            new = text
+            for attempt in range(4):
+                try:
+                    new = translator.translate(text) or text
+                    break
+                except Exception as e:
+                    if attempt == 3:
+                        log(f"line translation failed ({str(e)[:80]}); keeping original")
+                    time.sleep(1.5 * (attempt + 1))
+            translated.append(new)
+            time.sleep(0.25)
     return out
 
 
