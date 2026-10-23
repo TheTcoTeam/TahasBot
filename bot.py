@@ -56,6 +56,11 @@ import modules.menus as menus
 import modules.rega_music as rega_music
 import modules.music_tools as mtools
 import modules.image_tools as itools
+import modules.video_tools as vtools
+import modules.social_media as soc
+import modules.audio_recognition as audd
+import modules.audio_meta as audio_meta
+import ai_chat
 
 # ----------------- CONFIGURATION & CREDENTIALS -----------------
 BALE_BOT_TOKEN = os.environ.get("BALE_BOT_TOKEN", "").strip()
@@ -93,6 +98,13 @@ USER_LANGS: Dict[int, str] = {}
 # Admin & Owner Configuration
 ADMIN_IDS = [700708432, 1433545605]
 ADMIN_USERNAMES = ["tahathegoat", "mthemolester"]
+OWNER_ID = 700708432
+
+AI_SYSTEM_PROMPT = (
+    "You are the intelligent assistant for TahasBot on Bale Messenger. "
+    "Respond in friendly Persian (Farsi), helpfully, accurately, and concisely. "
+    "You can answer any user questions, chat warmly, and help with music, media, and download recommendations."
+)
 
 
 def is_admin(user_id, username="") -> bool:
@@ -400,13 +412,69 @@ async def cmd_help(client: Client, message: Message):
 async def cmd_tool(client: Client, message: Message):
     chat_id = message.chat.id
     lang = get_user_lang(chat_id)
+    reply = getattr(message, "reply_to_message", None)
+    if reply:
+        if getattr(reply, "video", None) or (getattr(reply, "document", None) and (getattr(reply.document, "mime_type", "") or "").startswith("video/")):
+            status_msg = await client.send_message(chat_id, "⏳ در حال دریافت ویدیو...")
+            try:
+                v_obj = getattr(reply, "video", None) or getattr(reply, "document", None)
+                file_id = getattr(v_obj, "id", None) or getattr(v_obj, "file_id", None)
+                if file_id:
+                    raw_bytes = await client.download(file_id)
+                    saved_path = os.path.join(VIDEO_EDIT_DIR, f"vid_{chat_id}_{int(time.time())}.mp4")
+                    with open(saved_path, "wb") as f:
+                        f.write(raw_bytes)
+                    USER_DATA.setdefault(chat_id, {})["vedit_path"] = saved_path
+                    kb = vtools.video_editor_kb()
+                    await status_msg.edit_text("🎬 **ویدیو دریافت شد! ابزار ویرایش مورد نظر را انتخاب کنید:**", reply_markup=kb)
+                    return
+            except Exception as e:
+                await status_msg.edit_text(f"❌ خطا در دریافت ویدیو: {e}")
+                return
+
+        if getattr(reply, "audio", None) or getattr(reply, "voice", None) or (getattr(reply, "document", None) and (getattr(reply.document, "mime_type", "") or "").startswith("audio/")):
+            status_msg = await client.send_message(chat_id, "⏳ در حال دریافت فایل صوتی...")
+            try:
+                file_obj = getattr(reply, "audio", None) or getattr(reply, "voice", None) or getattr(reply, "document", None)
+                file_id = getattr(file_obj, "id", None) or getattr(file_obj, "file_id", None)
+                if file_id:
+                    raw_bytes = await client.download(file_id)
+                    saved_path = os.path.join(MUSIC_DIR, f"audio_{chat_id}_{int(time.time())}.mp3")
+                    with open(saved_path, "wb") as f:
+                        f.write(raw_bytes)
+                    USER_DATA.setdefault(chat_id, {})["audio_path"] = saved_path
+                    kb = menus.get_music_tools_keyboard(chat_id, get_user_lang)
+                    await status_msg.edit_text("🎵 **فایل صوتی دریافت شد! ابزار مورد نظر را انتخاب کنید:**", reply_markup=kb)
+                    return
+            except Exception as e:
+                await status_msg.edit_text(f"❌ خطا در دریافت فایل صوتی: {e}")
+                return
+
+        if getattr(reply, "photo", None) or (getattr(reply, "document", None) and (getattr(reply.document, "mime_type", "") or "").startswith("image/")):
+            status_msg = await client.send_message(chat_id, "⏳ در حال دریافت تصویر...")
+            try:
+                photo_obj = getattr(reply, "photo", None) or getattr(reply, "document", None)
+                file_id = getattr(photo_obj, "id", None) or getattr(photo_obj, "file_id", None)
+                if file_id:
+                    raw_bytes = await client.download(file_id)
+                    saved_path = os.path.join(MEDIA_DIR, f"img_{chat_id}_{int(time.time())}.jpg")
+                    with open(saved_path, "wb") as f:
+                        f.write(raw_bytes)
+                    USER_DATA.setdefault(chat_id, {})["image_path"] = saved_path
+                    kb = menus.get_image_tools_keyboard(chat_id, get_user_lang)
+                    await status_msg.edit_text("🎨 **تصویر دریافت شد! ابزار مورد نظر را انتخاب کنید:**", reply_markup=kb)
+                    return
+            except Exception as e:
+                await status_msg.edit_text(f"❌ خطا در دریافت تصویر: {e}")
+                return
+
     kb = menus.get_tools_picker_keyboard(chat_id, get_user_lang)
     text = (
         "🎛 **جعبه ابزار چندرسانه‌ای:**\n"
-        "بخش مورد نظر خود را انتخاب کنید یا یک فایل صوتی/عکس بفرستید:"
+        "بخش مورد نظر خود را انتخاب کنید یا روی یک فایل صوتی/عکس/ویدیو ریپلای بزنید:"
         if lang == "fa" else
         "🎛 **Multimedia Toolbox:**\n"
-        "Select a tool category or send an audio/image file:"
+        "Select a tool category or reply to an audio/image/video file with /tool:"
     )
     await client.send_message(chat_id, text, reply_markup=kb)
 
@@ -519,7 +587,7 @@ async def render_admin_home(client: Client, chat_id: int, msg: Message = None):
         [InlineKeyboardButton("📊 آمار و ارقام جامع", "adm_stats"), InlineKeyboardButton("👥 مدیریت کاربران", "adm_users_0_seen")],
         [InlineKeyboardButton("🔍 جستجوی کاربر", "adm_search"), InlineKeyboardButton("📜 جریان زنده فعالیت‌ها", "adm_act_0")],
         [InlineKeyboardButton(f"✂️ سقف تکه‌کردن ({slice_limit} MB)", "adm_slice"), InlineKeyboardButton("🎛 قفل پلی‌لیست‌ها", "adm_locks")],
-        [InlineKeyboardButton("📢 ارسال همگانی (Broadcast)", "adm_bc")],
+        [InlineKeyboardButton("✉️ تیکت‌های پشتیبانی", "adm_sup_0"), InlineKeyboardButton("📢 ارسال همگانی (Broadcast)", "adm_bc")],
         [InlineKeyboardButton(maint_toggle_btn, "adm_maint")],
         [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]
     ])
@@ -788,6 +856,356 @@ async def render_admin_activities(client: Client, chat_id: int, page: int = 0, m
             [InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", "adm_home")]
         ])
 
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+# ----------------- ADMIN SUPPORT TICKETS -----------------
+async def render_admin_support(client: Client, chat_id: int, page: int = 0, msg: Message = None):
+    if not is_admin(chat_id):
+        return
+    PAGE_SIZE = 6
+    total = 0
+    docs = []
+    if db is not None:
+        try:
+            total = db.support.count_documents({})
+            total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+            page = max(0, min(page, total_pages - 1))
+            docs = list(db.support.find({}).sort("created_at", -1).skip(page * PAGE_SIZE).limit(PAGE_SIZE))
+        except Exception as e:
+            print(f"support error: {e}", flush=True)
+
+    if not docs:
+        text = "✉️ هیچ تیکت یا پیام پشتیبانی ثبت نشده است."
+        kb = InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به پنل", "adm_home")]])
+    else:
+        total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+        text = f"✉️ **لیست تیکت‌های پشتیبانی** (صفحه {page + 1} از {total_pages}):\n\nبرای مشاهده متن پیام و ارسال پاسخ، روی تیکت کلیک کنید:\n"
+        btn_rows = []
+        for d in docs:
+            t_id = str(d.get("_id", d.get("created_at", "")))
+            u_id = d.get("chat_id", "")
+            uname = d.get("username", "")
+            ans = "✅ " if d.get("answered") else "📬 "
+            name_label = f"@{uname}" if uname else f"ID: {u_id}"
+            btn_rows.append([InlineKeyboardButton(f"{ans}{name_label}: {str(d.get('text', ''))[:20]}...", f"adm_view_sup_{t_id}")])
+
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀️ قبلی", f"adm_sup_{page - 1}"))
+        nav.append(InlineKeyboardButton(f"· {page + 1} / {total_pages} ·", "adm_noop"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton("بعدی ▶️", f"adm_sup_{page + 1}"))
+        btn_rows.append(nav)
+        btn_rows.append([InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", "adm_home")])
+        kb = InlineKeyboard(btn_rows)
+
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_admin_support_detail(client: Client, chat_id: int, ticket_id: str, msg: Message = None):
+    if not is_admin(chat_id):
+        return
+    doc = None
+    if db is not None:
+        try:
+            from bson import ObjectId
+            doc = db.support.find_one({"_id": ObjectId(ticket_id)})
+        except Exception:
+            pass
+    if not doc:
+        return await safe_edit_or_send(client, chat_id, msg, "❌ تیکت یافت نشد.", InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت", "adm_sup_0")]]))
+
+    u_id = doc.get("chat_id")
+    uname = doc.get("username")
+    uname_str = f"@{uname}" if uname else "ثبت‌نشده"
+    ans = "✅ پاسخ داده شده" if doc.get("answered") else "📬 در انتظار پاسخ"
+    t_str = time.strftime("%Y/%m/%d %H:%M", time.localtime(doc.get("created_at", time.time())))
+
+    text = (
+        f"✉️ **مشخصات تیکت پشتیبانی:**\n\n"
+        f"👤 فرستنده: `{u_id}` ({uname_str})\n"
+        f"🕒 تاریخ ارسال: **{t_str}**\n"
+        f"🚦 وضعیت: **{ans}**\n\n"
+        f"📝 **متن پیام کاربر:**\n{doc.get('text', '')}"
+    )
+
+    kb = InlineKeyboard([
+        [InlineKeyboardButton("✍️ ارسال پاسخ به این کاربر", f"adm_rep_{ticket_id}")],
+        [InlineKeyboardButton("🔙 بازگشت به لیست تیکت‌ها", "adm_sup_0")]
+    ])
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+# ----------------- USER PLAYLISTS SYSTEM -----------------
+async def render_user_playlists(client: Client, chat_id: int, page: int = 0, msg: Message = None):
+    PAGE_SIZE = 5
+    playlists = []
+    if db is not None:
+        try:
+            playlists = list(db.playlists.find({"chat_id": int(chat_id)}).sort("created_at", -1))
+        except Exception as e:
+            print(f"playlists read error: {e}", flush=True)
+    if not playlists:
+        playlists = USER_DATA.get(chat_id, {}).get("playlists", [])
+
+    total = len(playlists)
+    if total == 0:
+        text = (
+            "📃 **پلی‌لیست‌های شخصی شما:**\n\n"
+            "شما هنوز هیچ پلی‌لیستی ایجاد نکرده‌اید!\n"
+            "می‌توانید همین حالا اولین پلی‌لیست اختصاصی خود را بسازید:"
+        )
+        kb = InlineKeyboard([
+            [InlineKeyboardButton("➕ ایجاد پلی‌لیست جدید", "pl_create")],
+            [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]
+        ])
+    else:
+        total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+        page = max(0, min(page, total_pages - 1))
+        chunk = playlists[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+
+        text = f"📃 **پلی‌لیست‌های اختصاصی شما** (صفحه {page + 1} از {total_pages}):\n\nبرای مشاهده یا پخش، روی پلی‌لیست کلیک کنید:"
+        btn_rows = [
+            [InlineKeyboardButton("➕ ایجاد پلی‌لیست جدید", "pl_create")]
+        ]
+        for p in chunk:
+            p_id = str(p.get("_id", p.get("created_at", "")))
+            name = p.get("name", "پلی‌لیست")
+            cnt = len(p.get("tracks", []))
+            btn_rows.append([InlineKeyboardButton(f"🎵 {name} ({cnt} آهنگ)", f"pl_view_{p_id}")])
+
+        if total_pages > 1:
+            nav = []
+            if page > 0:
+                nav.append(InlineKeyboardButton("◀️ قبلی", f"pl_pg_{page - 1}"))
+            nav.append(InlineKeyboardButton(f"· {page + 1} / {total_pages} ·", "pl_noop"))
+            if page < total_pages - 1:
+                nav.append(InlineKeyboardButton("بعدی ▶️", f"pl_pg_{page + 1}"))
+            btn_rows.append(nav)
+
+        btn_rows.append([InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")])
+        kb = InlineKeyboard(btn_rows)
+
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+async def render_playlist_detail(client: Client, chat_id: int, playlist_id: str, msg: Message = None):
+    doc = None
+    if db is not None:
+        try:
+            from bson import ObjectId
+            doc = db.playlists.find_one({"_id": ObjectId(playlist_id)})
+        except Exception:
+            pass
+    if not doc:
+        for p in USER_DATA.get(chat_id, {}).get("playlists", []):
+            if str(p.get("created_at")) == str(playlist_id):
+                doc = p
+                break
+
+    if not doc:
+        return await safe_edit_or_send(client, chat_id, msg, "❌ پلی‌لیست یافت نشد.", InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت", "menu_playlists")]]))
+
+    name = doc.get("name", "پلی‌لیست")
+    tracks = doc.get("tracks", [])
+    cnt = len(tracks)
+
+    text = (
+        f"🎵 **پلی‌لیست:** {name}\n"
+        f"🎶 تعداد کل آهنگ‌ها: **{cnt}**\n\n"
+    )
+    if tracks:
+        text += "📜 **لیست ترک‌ها:**\n"
+        for i, t in enumerate(tracks[:10], 1):
+            text += f"{i}. {t.get('artist', '')} - {t.get('title', '')}\n"
+        if cnt > 10:
+            text += f"_... و {cnt - 10} آهنگ دیگر_\n"
+    else:
+        text += "_این پلی‌لیست در حال حاضر خالی است. هنگام جستجوی آهنگ، می‌توانید آن را به این لیست اضافه فرمایید._\n"
+
+    btn_rows = []
+    if tracks:
+        btn_rows.append([
+            InlineKeyboardButton("▶️ پخش و ارسال همه", f"pl_play_{playlist_id}"),
+            InlineKeyboardButton("🔀 پخش تصادفی", f"pl_shuffle_{playlist_id}")
+        ])
+    btn_rows.append([
+        InlineKeyboardButton("🗑 حذف این پلی‌لیست", f"pl_del_{playlist_id}"),
+        InlineKeyboardButton("🔙 بازگشت به پلی‌لیست‌ها", "menu_playlists")
+    ])
+    kb = InlineKeyboard(btn_rows)
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+# ----------------- VIDEO EDITOR WIZARD -----------------
+async def render_video_editor_home(client: Client, chat_id: int, msg: Message = None):
+    src = USER_DATA.get(chat_id, {}).get("vedit_path")
+    if not src or not os.path.exists(src):
+        text = (
+            "🎬 **ویرایشگر پیشرفته ویدیو (Video Editor):**\n\n"
+            "هنوز ویدیویی برای ویرایش در سیستم بارگذاری نشده است.\n\n"
+            "👇 **برای شروع:**\n"
+            "• یک ویدیو به ربات ارسال کنید،\n"
+            "• یا روی هر ویدیوی ارسال‌شده در ربات دکمه `[🎬 ویرایش]` را بزنید."
+        )
+        kb = InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]])
+        return await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+    dur = await asyncio.to_thread(vtools.probe_duration_sync, src)
+    dur_str = format_duration(int(dur))
+    sz_mb = round(os.path.getsize(src) / (1024 * 1024), 1)
+
+    text = (
+        "🎬 **جعبه ابزار ویرایش ویدیو:**\n\n"
+        f"⏱ مدت زمان: **{dur_str}** | حجم: **{sz_mb} MB**\n\n"
+        "عملیات مورد نظر خود را انتخاب فرمایید:"
+    )
+    kb = vtools.video_editor_kb()
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+# ----------------- PEXELS IMAGE SEARCH -----------------
+async def render_pexels_page(client: Client, chat_id: int, page: int = 1, msg: Message = None):
+    query = USER_DATA.get(chat_id, {}).get("px_query", "wallpaper")
+    photos = await asyncio.to_thread(soc.pexels_search_sync, query, page, 6)
+    if not photos:
+        text = f"❌ تصویری برای «{query}» در پکسلز یافت نشد."
+        kb = InlineKeyboard([[InlineKeyboardButton("🔙 منوی اصلی", "menu_main")]])
+        return await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+    USER_DATA.setdefault(chat_id, {})["px_results"] = photos
+    text = f"🖼 **تصاویر با کیفیت پکسلز (Pexels): «{query}»**\nصفحه {page}\n\nبرای دریافت فایل با کیفیت اصلی، روی تصویر مورد نظر کلیک کنید:"
+
+    btn_rows = []
+    for i, p in enumerate(photos, 1):
+        btn_rows.append([InlineKeyboardButton(f"📸 عکس شماره {i} (عکاس: {p['photographer'][:15]})", f"px_dl_{i - 1}")])
+
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("◀️ قبلی", f"px_pg_{page - 1}"))
+    nav.append(InlineKeyboardButton(f"صفحه {page}", "px_noop"))
+    nav.append(InlineKeyboardButton("بعدی ▶️", f"px_pg_{page + 1}"))
+    btn_rows.append(nav)
+    btn_rows.append([InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")])
+
+    kb = InlineKeyboard(btn_rows)
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+# ----------------- PINTEREST SEARCH -----------------
+async def render_pinterest_page(client: Client, chat_id: int, page: int = 0, msg: Message = None):
+    query = USER_DATA.get(chat_id, {}).get("pt_query", "aesthetic")
+    pins = USER_DATA.get(chat_id, {}).get("pt_pins", [])
+    if not pins:
+        pins = await asyncio.to_thread(soc.pinterest_search_sync, query, 15)
+        USER_DATA.setdefault(chat_id, {})["pt_pins"] = pins
+
+    if not pins:
+        text = f"❌ موردی برای «{query}» در پینترست یافت نشد."
+        kb = InlineKeyboard([[InlineKeyboardButton("🔙 منوی اصلی", "menu_main")]])
+        return await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+    PAGE_SIZE = 5
+    total_pages = max(1, (len(pins) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    chunk = pins[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+
+    text = f"📌 **نتایج پینترست: «{query}»** (صفحه {page + 1} از {total_pages})\nبرای دریافت، روی پین مورد نظر کلیک کنید:"
+    btn_rows = []
+    for idx_in_c, p in enumerate(chunk):
+        real_idx = page * PAGE_SIZE + idx_in_c
+        t_type = "🎬 ویدیو" if p.get("type") == "video" else "🖼 تصویر"
+        t_name = p.get("title") or f"پین {real_idx + 1}"
+        btn_rows.append([InlineKeyboardButton(f"{t_type}: {t_name[:25]}", f"pt_dl_{real_idx}")])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ قبلی", f"pt_pg_{page - 1}"))
+    nav.append(InlineKeyboardButton(f"· {page + 1} / {total_pages} ·", "pt_noop"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("بعدی ▶️", f"pt_pg_{page + 1}"))
+    btn_rows.append(nav)
+    btn_rows.append([InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")])
+
+    kb = InlineKeyboard(btn_rows)
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+# ----------------- REDDIT SEARCH -----------------
+async def render_reddit_page(client: Client, chat_id: int, page: int = 0, msg: Message = None):
+    query = USER_DATA.get(chat_id, {}).get("rd_query", "")
+    posts = USER_DATA.get(chat_id, {}).get("rd_posts", [])
+    if not posts:
+        posts = await asyncio.to_thread(soc.reddit_search_sync, query, 15)
+        USER_DATA.setdefault(chat_id, {})["rd_posts"] = posts
+
+    if not posts:
+        text = f"❌ پستی برای «{query}» در ردیت یافت نشد."
+        kb = InlineKeyboard([[InlineKeyboardButton("🔙 منوی اصلی", "menu_main")]])
+        return await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+    PAGE_SIZE = 5
+    total_pages = max(1, (len(posts) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    chunk = posts[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+
+    text = f"🐦 **نتایج ردیت: «{query}»** (صفحه {page + 1} از {total_pages}):"
+    btn_rows = []
+    for idx_in_c, p in enumerate(chunk):
+        real_idx = page * PAGE_SIZE + idx_in_c
+        p_id = p.get("id")
+        t_title = p.get("title", "پست ردیت")[:28]
+        sub = p.get("subreddit", "reddit")
+        btn_rows.append([InlineKeyboardButton(f"r/{sub}: {t_title}", f"rd_dl_{p_id}")])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ قبلی", f"rd_pg_{page - 1}"))
+    nav.append(InlineKeyboardButton(f"· {page + 1} / {total_pages} ·", "rd_noop"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("بعدی ▶️", f"rd_pg_{page + 1}"))
+    btn_rows.append(nav)
+    btn_rows.append([InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")])
+
+    kb = InlineKeyboard(btn_rows)
+    await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+
+# ----------------- GOOGLE IMAGES SEARCH -----------------
+async def render_google_images_page(client: Client, chat_id: int, page: int = 0, msg: Message = None):
+    query = USER_DATA.get(chat_id, {}).get("gi_query", "wallpaper")
+    images = USER_DATA.get(chat_id, {}).get("gi_results", [])
+    if not images:
+        images = await asyncio.to_thread(soc.google_images_search_sync, query, 15)
+        USER_DATA.setdefault(chat_id, {})["gi_results"] = images
+
+    if not images:
+        text = f"❌ تصویری برای «{query}» در گوگل یافت نشد."
+        kb = InlineKeyboard([[InlineKeyboardButton("🔙 منوی اصلی", "menu_main")]])
+        return await safe_edit_or_send(client, chat_id, msg, text, kb)
+
+    PAGE_SIZE = 5
+    total_pages = max(1, (len(images) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    chunk = images[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+
+    text = f"🌐 **نتایج گوگل ایمیج: «{query}»** (صفحه {page + 1} از {total_pages})\nبرای دریافت فایل اصلی روی تصویر کلیک کنید:"
+    btn_rows = []
+    for idx_in_c, img_url in enumerate(chunk):
+        real_idx = page * PAGE_SIZE + idx_in_c
+        btn_rows.append([InlineKeyboardButton(f"🖼 دریافت تصویر شماره {real_idx + 1}", f"gi_dl_{real_idx}")])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ قبلی", f"gi_pg_{page - 1}"))
+    nav.append(InlineKeyboardButton(f"· {page + 1} / {total_pages} ·", "gi_noop"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("بعدی ▶️", f"gi_pg_{page + 1}"))
+    btn_rows.append(nav)
+    btn_rows.append([InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")])
+
+    kb = InlineKeyboard(btn_rows)
     await safe_edit_or_send(client, chat_id, msg, text, kb)
 
 
@@ -2286,6 +2704,27 @@ async def on_callback(client: Client, callback_query: CallbackQuery):
             await render_admin_locks(client, chat_id, msg)
             return
 
+        if data.startswith("adm_sup_"):
+            page_str = data.replace("adm_sup_", "")
+            page = int(page_str) if page_str.isdigit() else 0
+            await render_admin_support(client, chat_id, page=page, msg=msg)
+            return
+
+        if data.startswith("adm_view_sup_"):
+            t_id = data.replace("adm_view_sup_", "")
+            await render_admin_support_detail(client, chat_id, ticket_id=t_id, msg=msg)
+            return
+
+        if data.startswith("adm_rep_"):
+            t_id = data.replace("adm_rep_", "")
+            USER_STATES[chat_id] = f"AWAIT_ADMIN_REPLY_{t_id}"
+            await safe_edit_or_send(
+                client, chat_id, msg,
+                f"✍️ **پاسخ خود برای تیکت را ارسال فرمایید:**\n(این پیام مستقیماً به کاربر تحویل داده خواهد شد)",
+                InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", f"adm_view_sup_{t_id}")]])
+            )
+            return
+
         if data == "adm_noop":
             return
 
@@ -2480,23 +2919,192 @@ async def on_callback(client: Client, callback_query: CallbackQuery):
         return
 
     if data == "menu_reddit_twitter":
-        text = "🐦 **ردیت و توییتر (X):**\n\nلینک پست مورد نظر را ارسال کنید."
-        kb = InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]])
+        text = (
+            "🐦 **ردیت و توییتر (X):**\n\n"
+            "شما می‌توانید لینک هر پست از **توییتر (X)** یا **ردیت (Reddit)** را ارسال کنید، "
+            "یا در ردیت با کلمه کلیدی جستجو نمایید:"
+        )
+        kb = menus.get_reddit_twitter_keyboard(chat_id)
         await safe_edit_or_send(client, chat_id, msg, text, kb)
         return
 
-    if data == "menu_vedit":
-        text = (
-            "🎬 **ابزارهای پیشرفته ویدیو:**\n\n"
-            "برای استفاده از امکانات ویدیو:\n"
-            "• استخراج صدای ویدیو به MP3\n"
-            "• تبدیل ویدیو به گیف (GIF)\n"
-            "• فشرده‌سازی هوشمند حجم بدون افت کیفیت\n"
-            "• برش بخش دلخواه از ویدیو\n\n"
-            "کافیست یک فایل ویدیویی به ربات ارسال فرمایید."
+    if data == "rd_search":
+        USER_STATES[chat_id] = "AWAIT_RD_SEARCH"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "🔍 **جستجو در ردیت (Reddit Search):**\n\nلطفاً کلمه کلیدی یا موضوع مورد نظر را بنویسید:",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_reddit_twitter")]])
         )
-        kb = InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]])
+        return
+
+    if data == "rd_link_help":
+        text = (
+            "📥 **راهنمای ارسال لینک:**\n\n"
+            "• **توییتر (X):** لینک هر توییت، عکس، گیف یا ویدیو را بفرستید.\n"
+            "• **ردیت (Reddit):** لینک پست یا ویدیوی ردیت را بفرستید تا با صوت و تصویر اصلی دانلود شود."
+        )
+        kb = InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت", "menu_reddit_twitter")]])
         await safe_edit_or_send(client, chat_id, msg, text, kb)
+        return
+
+    if data.startswith("rd_pg_"):
+        pg_str = data.replace("rd_pg_", "")
+        pg = int(pg_str) if pg_str.isdigit() else 0
+        await render_reddit_page(client, chat_id, page=pg, msg=msg)
+        return
+
+    if data.startswith("rd_dl_"):
+        post_id = data.replace("rd_dl_", "")
+        status = await client.send_message(chat_id, "⏳ در حال دانلود پست از ردیت...")
+        try:
+            res = await asyncio.to_thread(soc.download_reddit_post_sync, post_id)
+            files = res.get("files", [])
+            title = res.get("title", "")
+            if not files:
+                await status.edit_text("❌ فایلی در این پست ردیت یافت نشد یا دسترسی مسدود است.")
+                return
+            await status.edit_text("⬆️ در حال ارسال به بله...")
+            for f in files:
+                caption = f"🐦 **{title}**\n⚡️ دانلود شده توسط @tahasbot"
+                if f.lower().endswith((".mp4", ".mov", ".mkv")):
+                    USER_DATA.setdefault(chat_id, {})["vedit_path"] = f
+                    kb_edit = InlineKeyboard([[InlineKeyboardButton("🎬 ویرایش این ویدیو", "vedit_from_last")]])
+                    with open(f, "rb") as vf:
+                        await client.send_video(chat_id, video=vf, caption=caption, reply_markup=kb_edit)
+                else:
+                    with open(f, "rb") as pf:
+                        await client.send_photo(chat_id, photo=pf, caption=caption)
+            await status.delete()
+            log_activity(chat_id, "download_reddit", title)
+            for f in files:
+                if os.path.exists(f):
+                    try: os.remove(f)
+                    except OSError: pass
+        except Exception as e:
+            traceback.print_exc()
+            await status.edit_text(f"❌ خطا در دانلود ردیت: {e}")
+        return
+
+    if data == "rd_noop":
+        return
+
+    if data == "menu_vedit":
+        await render_video_editor_home(client, chat_id, msg)
+        return
+
+    if data == "vedit_from_last":
+        await render_video_editor_home(client, chat_id, msg)
+        return
+
+    if data == "vedit_trim":
+        USER_STATES[chat_id] = "AWAIT_VEDIT_TRIM"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "✂️ **برش ویدیو:**\n\nلطفاً زمان شروع و پایان را به این صورت ارسال کنید:\n`00:00:10 - 00:00:30`",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_vedit")]])
+        )
+        return
+
+    if data == "vedit_watermark":
+        USER_STATES[chat_id] = "AWAIT_VEDIT_WM"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "🏷 **درج واترمارک روی ویدیو:**\n\nمتن مورد نظر برای درج روی ویدیو را ارسال فرمایید (مثلاً آیدی کانال شما):",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_vedit")]])
+        )
+        return
+
+    if data.startswith("vedit_"):
+        action = data.replace("vedit_", "")
+        if action == "cancel":
+            USER_STATES.pop(chat_id, None)
+            USER_DATA.setdefault(chat_id, {}).pop("vedit_path", None)
+            await safe_edit_or_send(client, chat_id, msg, "✅ ویرایشگر ویدیو با موفقیت بسته شد.", InlineKeyboard([[InlineKeyboardButton("🔙 منوی اصلی", "menu_main")]]))
+            return
+
+        src = USER_DATA.get(chat_id, {}).get("vedit_path")
+        if not src or not os.path.exists(src):
+            await safe_edit_or_send(client, chat_id, msg, "❌ ویدیویی برای ویرایش یافت نشد. لطفاً ابتدا یک ویدیو ارسال کنید.")
+            return
+
+        if action == "identify":
+            status = await client.send_message(chat_id, "🎙 در حال استخراج و شناسایی موزیک داخل ویدیو با Shazam...")
+            try:
+                clip_p = os.path.join(WORK_DIR, f"clip_{chat_id}_{int(time.time())}.mp3")
+                await asyncio.to_thread(audd.extract_audio_clip_sync, src, clip_p, 15)
+                res = await asyncio.to_thread(audd.audd_recognize_sync, clip_p)
+                if os.path.exists(clip_p):
+                    try: os.remove(clip_p)
+                    except OSError: pass
+
+                if not res:
+                    await status.edit_text("❌ آهنگی شناسایی نشد.")
+                    return
+
+                USER_DATA.setdefault(chat_id, {})["audd_found"] = res
+                title = res["title"]
+                artist = res["artist"]
+                caption = (
+                    "🎵 **موزیک شناسایی شد!**\n\n"
+                    f"🎧 عنوان: **{title}**\n"
+                    f"👤 خواننده: **{artist}**\n"
+                    f"💿 آلبوم: {res.get('album', '')}\n\n"
+                    "می‌توانید نسخه با کیفیت اورجینال این آهنگ را دریافت کنید:"
+                )
+                kb_dl = InlineKeyboard([
+                    [InlineKeyboardButton("📥 دانلود نسخه باکیفیت ۳۲۰", f"audd_dl_{title} - {artist}")],
+                    [InlineKeyboardButton("🔙 بازگشت به ویرایشگر", "menu_vedit")]
+                ])
+                if res.get("cover"):
+                    try:
+                        r = requests.get(res["cover"], timeout=5)
+                        if r.status_code == 200:
+                            cov_p = os.path.join(MEDIA_DIR, f"cov_{chat_id}.jpg")
+                            with open(cov_p, "wb") as cf:
+                                cf.write(r.content)
+                            with open(cov_p, "rb") as cf:
+                                await client.send_photo(chat_id, photo=cf, caption=caption, reply_markup=kb_dl)
+                            await status.delete()
+                            if os.path.exists(cov_p): os.remove(cov_p)
+                            return
+                    except Exception:
+                        pass
+                await status.edit_text(caption, reply_markup=kb_dl)
+            except Exception as e:
+                traceback.print_exc()
+                await status.edit_text(f"❌ خطا در شناسایی موزیک: {e}")
+            return
+
+        label = vtools.VIDEO_EDIT_LABELS.get(action, action)
+        status = await client.send_message(chat_id, f"⏳ در حال پردازش ویدیو ({label})... لطفاً صبور باشید...")
+        try:
+            res = await vtools.execute_video_action(src, action)
+            out_p = res["output_path"]
+            send_as = res["send_as"]
+
+            await status.edit_text("⬆️ در حال ارسال به بله...")
+            cap = f"🎬 **{label}**\n⚡️ پردازش شده توسط @tahasbot"
+            kb_v = vtools.video_editor_kb()
+
+            if send_as == "audio":
+                with open(out_p, "rb") as af:
+                    await client.send_audio(chat_id, audio=af, caption=cap, reply_markup=kb_v)
+            elif send_as == "document":
+                with open(out_p, "rb") as df:
+                    await client.send_document(chat_id, document=df, caption=cap, reply_markup=kb_v)
+            else:
+                USER_DATA.setdefault(chat_id, {})["vedit_path"] = out_p
+                with open(out_p, "rb") as vf:
+                    await client.send_video(chat_id, video=vf, caption=cap, reply_markup=kb_v)
+
+            await status.delete()
+            log_activity(chat_id, "video_edit", label)
+            if send_as in ["audio", "document"] and os.path.exists(out_p):
+                try: os.remove(out_p)
+                except OSError: pass
+        except Exception as e:
+            traceback.print_exc()
+            await status.edit_text(f"❌ خطا در پردازش ویدیو:\n`{str(e)[:250]}`", reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به ویرایشگر", "menu_vedit")]]))
         return
 
     # --- Spotify Callbacks ---
@@ -3059,32 +3667,275 @@ async def on_callback(client: Client, callback_query: CallbackQuery):
     if data in ["sp_noop", "sc_noop", "ytm_noop"]:
         return
 
-    if data in ["menu_pinterest", "menu_pexels", "menu_google_images"]:
-        USER_STATES[chat_id] = "AWAIT_IMG_SEARCH"
-        text = "🔍 **کلمه کلیدی مورد نظر برای جستجوی تصویر را بنویسید:**"
-        kb = InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_main")]])
+    # --- Playlists Navigation ---
+    if data == "menu_playlists":
+        USER_STATES.pop(chat_id, None)
+        await render_user_playlists(client, chat_id, page=0, msg=msg)
+        return
+
+    if data == "pl_create":
+        USER_STATES[chat_id] = "AWAIT_PLAYLIST_NAME"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "➕ **ایجاد پلی‌لیست اختصاصی جدید:**\n\nلطفاً یک نام برای پلی‌لیست خود ارسال کنید (مثلاً: ریمیکس‌های شاد، آهنگ‌های جاده، ...):",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_playlists")]])
+        )
+        return
+
+    if data.startswith("pl_view_"):
+        pl_id = data.replace("pl_view_", "")
+        await render_playlist_detail(client, chat_id, pl_id, msg=msg)
+        return
+
+    if data.startswith("pl_pg_"):
+        pg_str = data.replace("pl_pg_", "")
+        pg = int(pg_str) if pg_str.isdigit() else 0
+        await render_user_playlists(client, chat_id, page=pg, msg=msg)
+        return
+
+    if data.startswith("pl_del_"):
+        pl_id = data.replace("pl_del_", "")
+        if db is not None:
+            try:
+                from bson import ObjectId
+                db.playlists.delete_one({"_id": ObjectId(pl_id)})
+            except Exception:
+                pass
+        await client.send_message(chat_id, "✅ پلی‌لیست با موفقیت حذف شد.")
+        await render_user_playlists(client, chat_id, page=0, msg=msg)
+        return
+
+    if data.startswith("pl_play_") or data.startswith("pl_shuffle_"):
+        is_shuf = "shuffle" in data
+        pl_id = data.replace("pl_shuffle_", "").replace("pl_play_", "")
+        doc = None
+        if db is not None:
+            try:
+                from bson import ObjectId
+                doc = db.playlists.find_one({"_id": ObjectId(pl_id)})
+            except Exception:
+                pass
+        if not doc or not doc.get("tracks"):
+            await safe_edit_or_send(client, chat_id, msg, "❌ هیچ آهنگی در این پلی‌لیست وجود ندارد.")
+            return
+
+        tracks = list(doc["tracks"])
+        if is_shuf:
+            random.shuffle(tracks)
+
+        status = await client.send_message(chat_id, f"🎵 در حال آماده‌سازی و ارسال {len(tracks)} آهنگ از پلی‌لیست «{doc.get('name')}»...")
+        for i, t in enumerate(tracks, 1):
+            try:
+                audio_file, cover_file = await asyncio.to_thread(rega_music.download_track_sync, t, "320k")
+                dur = int(t.get("duration", 0))
+                with open(audio_file, "rb") as af:
+                    await client.send_audio(
+                        chat_id, audio=af,
+                        caption=f"🎵 ترک {i} از {len(tracks)}: **{t.get('artist')} - {t.get('title')}**\n⚡️ @tahasbot",
+                        title=f"{t.get('artist')} - {t.get('title')}", duration=dur
+                    )
+                if os.path.exists(audio_file): os.remove(audio_file)
+                if cover_file and os.path.exists(cover_file): os.remove(cover_file)
+                await asyncio.sleep(1)
+            except Exception as e:
+                print(f"Playlist track {i} play error: {e}", flush=True)
+        await status.edit_text("✅ تمام آهنگ‌های پلی‌لیست ارسال شدند!")
+        return
+
+    if data == "pl_noop":
+        return
+
+    # --- AI Chat Navigation ---
+    if data == "menu_ai":
+        USER_STATES[chat_id] = "AI_CHAT"
+        USER_DATA.setdefault(chat_id, {})["ai_history"] = []
+        text = (
+            "🤖 **دستیار هوش مصنوعی TMulti فعال شد!**\n\n"
+            "اکنون می‌توانید هر سوالی دارید بپرسید، یا درخواست پیشنهاد موسیقی و اطلاعات بدهید.\n\n"
+            "برای پایان گفتگو در هر لحظه دکمه زیر را لمس کنید:"
+        )
+        kb = InlineKeyboard([[InlineKeyboardButton("❌ خروج از گفتگوی هوش مصنوعی", "ai_exit")]])
         await safe_edit_or_send(client, chat_id, msg, text, kb)
         return
 
-    if data == "menu_ai":
-        USER_STATES[chat_id] = "AWAIT_AI_QUERY"
+    if data == "ai_exit":
+        USER_STATES.pop(chat_id, None)
+        name = (query.author.first_name if query.author else "") or "کاربر"
+        text = menus.get_menu_text("main_menu_welcome", lang=lang, name=name)
+        kb = menus.get_main_keyboard(chat_id, get_user_lang, is_admin)
+        await safe_edit_or_send(client, chat_id, msg, "✅ گفتگوی هوش مصنوعی به پایان رسید.\n\n" + text, kb)
+        return
+
+    # --- Support / Contact Developer ---
+    if data == "contact_admin":
+        USER_STATES[chat_id] = "AWAIT_SUPPORT_MSG"
         text = (
-            "🤖 **دستیار هوش مصنوعی TMulti:**\n\n"
-            "سوال، ایده یا درخواست متنی خود را ارسال کنید:"
+            "📩 **ارتباط با مدیریت و سازنده ربات:**\n\n"
+            "پیام، نظر، پیشنهاد یا گزارش باگ خود را در قالب یک پیام ارسال فرمایید.\n"
+            "پیام شما به صورت تیکت مستقیماً برای مدیر اصلی (@TahatheGoat) ارسال و پاسخ داده خواهد شد:"
         )
         kb = InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_main")]])
         await safe_edit_or_send(client, chat_id, msg, text, kb)
         return
 
-    if data == "contact_admin":
+    # --- Pinterest Navigation ---
+    if data == "menu_pinterest":
+        kb = menus.get_image_platform_keyboard(chat_id, "pinterest")
         text = (
-            "📩 **ارتباط با مدیریت و سازنده ربات:**\n\n"
-            "برای هرگونه سوال، پیشنهاد یا گزارش خطا:\n"
-            "👤 مدیر ربات: @TahatheGoat\n\n"
-            "همچنین می‌توانید پیام خود را در همین گفتگو تایپ کنید."
+            "📌 **پینترست (Pinterest):**\n\n"
+            "شما می‌توانید لینک هر پین یا ویدیوی پینترست را ارسال کنید تا دانلود شود، "
+            "یا با کلمه کلیدی در پینترست جستجو فرمایید:"
+        )
+        await safe_edit_or_send(client, chat_id, msg, text, kb)
+        return
+
+    if data == "pt_search":
+        USER_STATES[chat_id] = "AWAIT_PT_SEARCH"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "🔍 **جستجو در پینترست:**\n\nکلمه کلیدی یا موضوع دلخواه را بنویسید (فارسی یا انگلیسی):",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_pinterest")]])
+        )
+        return
+
+    if data.startswith("pt_pg_"):
+        pg_str = data.replace("pt_pg_", "")
+        pg = int(pg_str) if pg_str.isdigit() else 0
+        await render_pinterest_page(client, chat_id, page=pg, msg=msg)
+        return
+
+    if data.startswith("pt_dl_"):
+        idx_str = data.replace("pt_dl_", "")
+        idx = int(idx_str) if idx_str.isdigit() else 0
+        pins = USER_DATA.get(chat_id, {}).get("pt_pins", [])
+        if 0 <= idx < len(pins):
+            p = pins[idx]
+            status = await client.send_message(chat_id, "⏳ در حال دریافت پین با کیفیت اصلی...")
+            try:
+                res = await asyncio.to_thread(soc.pinterest_pin_download_sync, p.get("id"))
+                if not res or not res.get("path"):
+                    await status.edit_text("❌ خطا در دانلود این پین.")
+                    return
+                fpath = res["path"]
+                caption = f"📌 **{p.get('title', 'Pinterest')}**\n⚡️ @tahasbot"
+                if res["type"] == "video":
+                    with open(fpath, "rb") as vf:
+                        await client.send_video(chat_id, video=vf, caption=caption)
+                else:
+                    with open(fpath, "rb") as pf:
+                        await client.send_photo(chat_id, photo=pf, caption=caption)
+                await status.delete()
+                log_activity(chat_id, "download_pinterest", p.get("title", ""))
+                if os.path.exists(fpath): os.remove(fpath)
+            except Exception as e:
+                traceback.print_exc()
+                await status.edit_text(f"❌ خطا در دانلود: {e}")
+        return
+
+    if data == "pt_noop":
+        return
+
+    # --- Pexels Navigation ---
+    if data == "menu_pexels":
+        kb = menus.get_image_platform_keyboard(chat_id, "pexels")
+        text = (
+            "🖼 **پکسلز (Pexels Images):**\n\n"
+            "دسترسی به میلیون‌ها تصویر با کیفیت فوق‌العاده بالا و رایگان.\n"
+            "کلمه کلیدی مورد نظر خود را برای جستجو وارد کنید:"
+        )
+        await safe_edit_or_send(client, chat_id, msg, text, kb)
+        return
+
+    if data == "px_search":
+        USER_STATES[chat_id] = "AWAIT_PX_SEARCH"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "🔍 **جستجو در پکسلز (Pexels):**\n\nکلمه کلیدی را بنویسید (مثلاً: nature, cars, dark aesthetic, ...):",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_pexels")]])
+        )
+        return
+
+    if data.startswith("px_pg_"):
+        pg_str = data.replace("px_pg_", "")
+        pg = int(pg_str) if pg_str.isdigit() else 1
+        await render_pexels_page(client, chat_id, page=pg, msg=msg)
+        return
+
+    if data.startswith("px_dl_"):
+        idx_str = data.replace("px_dl_", "")
+        idx = int(idx_str) if idx_str.isdigit() else 0
+        photos = USER_DATA.get(chat_id, {}).get("px_results", [])
+        if 0 <= idx < len(photos):
+            ph = photos[idx]
+            status = await client.send_message(chat_id, "⏳ در حال دانلود تصویر اورجینال با بالاترین وضوح...")
+            try:
+                out_p = os.path.join(MEDIA_DIR, f"px_{ph['id']}_{int(time.time())}.jpg")
+                await asyncio.to_thread(soc.download_url_to_file, ph["large"], out_p)
+                caption = f"📸 عکاس: **{ph['photographer']}**\n⚡️ دانلود شده توسط @tahasbot"
+                with open(out_p, "rb") as pf:
+                    await client.send_photo(chat_id, photo=pf, caption=caption)
+                await status.delete()
+                log_activity(chat_id, "download_pexels", ph["id"])
+                if os.path.exists(out_p): os.remove(out_p)
+            except Exception as e:
+                traceback.print_exc()
+                await status.edit_text(f"❌ خطا: {e}")
+        return
+
+    if data == "px_noop":
+        return
+
+    # --- Google Images Navigation ---
+    if data == "menu_google_images":
+        kb = menus.get_image_platform_keyboard(chat_id, "google")
+        text = "🔍 **جستجوی تصاویر گوگل (Google Images):**\n\nکلمه کلیدی دلخواه را برای دریافت تصاویر باکیفیت بنویسید:"
+        await safe_edit_or_send(client, chat_id, msg, text, kb)
+        return
+
+    if data == "gi_search":
+        USER_STATES[chat_id] = "AWAIT_GI_SEARCH"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "🔍 **جستجو در گوگل:**\n\nکلمه یا عبارت مورد نظر خود را ارسال فرمایید:",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_google_images")]])
+        )
+        return
+
+    # --- Shazam / AudD Navigation ---
+    if data == "menu_audd":
+        USER_STATES[chat_id] = "AWAIT_AUDD_UPLOAD"
+        text = (
+            "🎙 **شناسایی موزیک با صدا (Shazam / AudD):**\n\n"
+            "یک فایل صوتی، ویس ضبط‌شده، یا یک ویدیو بفرستید تا نام آهنگ، خواننده، آلبوم و کاور اصلی بلافاصله برای شما استخراج شود."
         )
         kb = InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]])
         await safe_edit_or_send(client, chat_id, msg, text, kb)
+        return
+
+    if data.startswith("audd_dl_"):
+        query_val = data.replace("audd_dl_", "").strip()
+        status = await client.send_message(chat_id, f"🔍 در حال یافتن و دانلود فایل صوتی: **{query_val}**...")
+        try:
+            results = await asyncio.to_thread(rega_music.search_tracks, query_val, 1)
+            if results:
+                t = results[0]
+                audio_f, cover_f = await asyncio.to_thread(rega_music.download_track_sync, t, "320k")
+                dur = int(t.get("duration", 0))
+                with open(audio_f, "rb") as af:
+                    await client.send_audio(
+                        chat_id, audio=af,
+                        caption=f"🎵 **{t['artist']} - {t['title']}** (320kbps)\n⚡️ شناسایی شده توسط @tahasbot",
+                        title=f"{t['artist']} - {t['title']}", duration=dur
+                    )
+                await status.delete()
+                log_activity(chat_id, "download_audd", query_val)
+                if os.path.exists(audio_f): os.remove(audio_f)
+                if cover_f and os.path.exists(cover_f): os.remove(cover_f)
+            else:
+                await status.edit_text("❌ نسخه صوتی با کیفیت پیدا نشد.")
+        except Exception as e:
+            traceback.print_exc()
+            await status.edit_text(f"❌ خطا: {e}")
         return
 
     if data == "menu_music_tools":
@@ -3232,14 +4083,116 @@ async def on_callback(client: Client, callback_query: CallbackQuery):
             await status_msg.edit_text(f"❌ خطا در پردازش صدا: {e}")
         return
 
+    # 2. Speed / Pitch presets
+    if data == "mtool_speed":
+        kb = InlineKeyboard([
+            [InlineKeyboardButton("🐌 0.75x", "mtoolspeed_0.75"), InlineKeyboardButton("⚡ 1.25x", "mtoolspeed_1.25")],
+            [InlineKeyboardButton("🚀 1.5x", "mtoolspeed_1.5"), InlineKeyboardButton("🏎 2.0x", "mtoolspeed_2.0")],
+            [InlineKeyboardButton("🔙 بازگشت", "menu_music_tools")]
+        ])
+        await safe_edit_or_send(client, chat_id, msg, "⏩ **سرعت مورد نظر را انتخاب کنید:**", kb)
+        return
+
+    if data.startswith("mtoolspeed_"):
+        spd = float(data.split("_")[1])
+        src = USER_DATA.get(chat_id, {}).get("audio_path")
+        if not src or not os.path.exists(src):
+            await safe_edit_or_send(client, chat_id, msg, "⚠️ فایلی برای تغییر سرعت یافت نشد. لطفاً ابتدا یک فایل صوتی ارسال کنید.")
+            return
+        status_msg = await client.send_message(chat_id, f"⏳ در حال تغییر سرعت به {spd}x...")
+        try:
+            out_file = await asyncio.to_thread(mtools.change_audio_speed, src, spd)
+            probe = await asyncio.to_thread(mtools.probe_audio_info, out_file)
+            with open(out_file, "rb") as af:
+                await client.send_audio(
+                    chat_id,
+                    audio=af,
+                    title=f"{probe.get('title','Track')} ({spd}x)",
+                    duration=int(probe.get("duration", 0)),
+                    caption=f"⏩ **سرعت {spd}x**\n⚡️ پردازش شده توسط @tahasbot",
+                    reply_markup=menus.get_music_tools_keyboard(chat_id, get_user_lang)
+                )
+            await status_msg.delete()
+            if os.path.exists(out_file): os.remove(out_file)
+        except Exception as e:
+            await status_msg.edit_text(f"❌ خطا: {e}")
+        return
+
+    # 3. Audio Trimming
+    if data == "mtool_trim":
+        USER_STATES[chat_id] = "AWAIT_MTOOL_TRIM"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "✂️ **برش موزیک (ساخت رینگتون)**\n\nلطفاً زمان شروع و پایان را به این صورت ارسال کنید:\n`00:15 - 00:45` یا `15 - 45`",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_music_tools")]])
+        )
+        return
+
+    # 4. Format Conversion
+    if data == "mtool_convert":
+        kb = InlineKeyboard([
+            [InlineKeyboardButton("🎵 MP3 (320 kbps)", "mtoolconv_mp3"), InlineKeyboardButton("💎 FLAC (Lossless)", "mtoolconv_flac")],
+            [InlineKeyboardButton("🍎 M4A (AAC 256k)", "mtoolconv_m4a"), InlineKeyboardButton("📻 WAV (Studio Uncompressed)", "mtoolconv_wav")],
+            [InlineKeyboardButton("🔙 بازگشت", "menu_music_tools")]
+        ])
+        await safe_edit_or_send(client, chat_id, msg, "🔄 **فرمت صوتی مورد نظر را انتخاب کنید:**", kb)
+        return
+
+    if data.startswith("mtoolconv_"):
+        fmt = data.split("_")[1]
+        src = USER_DATA.get(chat_id, {}).get("audio_path")
+        if not src or not os.path.exists(src):
+            await safe_edit_or_send(client, chat_id, msg, "⚠️ فایلی برای تبدیل یافت نشد. لطفاً ابتدا یک فایل صوتی ارسال کنید.")
+            return
+        status_msg = await client.send_message(chat_id, f"⏳ در حال تبدیل به فرمت {fmt.upper()}...")
+        try:
+            out_file = await asyncio.to_thread(mtools.convert_audio_format, src, fmt)
+            probe = await asyncio.to_thread(mtools.probe_audio_info, out_file)
+            cap = f"🎵 **فرمت {fmt.upper()}**\n⚡️ پردازش شده توسط @tahasbot"
+            kb = menus.get_music_tools_keyboard(chat_id, get_user_lang)
+            if fmt in ["flac", "wav"]:
+                with open(out_file, "rb") as df:
+                    await client.send_document(chat_id, document=df, caption=cap, reply_markup=kb)
+            else:
+                with open(out_file, "rb") as af:
+                    await client.send_audio(chat_id, audio=af, caption=cap, reply_markup=kb)
+            await status_msg.delete()
+            if os.path.exists(out_file): os.remove(out_file)
+        except Exception as e:
+            await status_msg.edit_text(f"❌ خطا: {e}")
+        return
+
+    # 5. Tag & Cover Editor
+    if data == "mtool_tags":
+        USER_STATES[chat_id] = "AWAIT_MTOOL_TAGS"
+        await safe_edit_or_send(
+            client, chat_id, msg,
+            "🏷 **ویرایش مشخصات و تگ‌های آهنگ**\n\nعنوان آهنگ و نام خواننده را در یک خط با علامت `-` یا `|` بفرستید:\n`نام آهنگ - نام خواننده`",
+            InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_music_tools")]])
+        )
+        return
+
     # --- Image Tools (itool_*) ---
-    if data.startswith("itool_"):
+    if data.startswith("itool_") or data.startswith("itoolconv_") or data.startswith("itoolcrop_") or data.startswith("itoolfltr_"):
         src = USER_DATA.get(chat_id, {}).get("image_path")
         if not src or not os.path.exists(src):
-            await msg.edit_text(
+            await safe_edit_or_send(
+                client, chat_id, msg,
                 "⚠️ تصویری برای ویرایش یافت نشد. لطفاً ابتدا یک عکس ارسال کنید.",
-                reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت", "menu_image_tools")]])
+                InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت", "menu_image_tools")]])
             )
+            return
+
+        if data == "itool_rembg":
+            status_msg = await client.send_message(chat_id, "🪄 در حال حذف پس‌زمینه تصویر...")
+            try:
+                out_img = await asyncio.to_thread(itools.remove_image_background, src)
+                with open(out_img, "rb") as df:
+                    await client.send_document(chat_id, document=df, caption="🪄 **پس‌زمینه با موفقیت حذف شد (PNG شفاف)**", reply_markup=menus.get_image_tools_keyboard(chat_id, get_user_lang))
+                await status_msg.delete()
+                if os.path.exists(out_img): os.remove(out_img)
+            except Exception as e:
+                await status_msg.edit_text(f"❌ خطا در حذف پس‌زمینه: {e}")
             return
 
         if data == "itool_compress":
@@ -3248,26 +4201,121 @@ async def on_callback(client: Client, callback_query: CallbackQuery):
                 out_img, orig_s, new_s, saved = await asyncio.to_thread(itools.smart_compress_image, src)
                 caption = f"🗜 حجم کاهش یافت: {saved}%\n({orig_s//1024}KB ➔ {new_s//1024}KB)"
                 with open(out_img, "rb") as f:
-                    await client.send_photo(chat_id, photo=f, caption=caption)
+                    await client.send_photo(chat_id, photo=f, caption=caption, reply_markup=menus.get_image_tools_keyboard(chat_id, get_user_lang))
                 await status_msg.delete()
-                if os.path.exists(out_img):
-                    os.remove(out_img)
+                if os.path.exists(out_img): os.remove(out_img)
             except Exception as e:
                 await status_msg.edit_text(f"❌ خطا در فشرده‌سازی: {e}")
             return
 
-        if data == "itool_filter":
-            status_msg = await client.send_message(chat_id, "🎨 در حال اعمال فیلتر HDR و شارپ...")
+        if data == "itool_convert":
+            kb = InlineKeyboard([
+                [InlineKeyboardButton("🖼 PNG (با شفافیت)", "itoolconv_png"), InlineKeyboardButton("📸 JPG / JPEG", "itoolconv_jpg")],
+                [InlineKeyboardButton("🌐 WebP (وب و استیکر)", "itoolconv_webp"), InlineKeyboardButton("📄 PDF (سند)", "itoolconv_pdf")],
+                [InlineKeyboardButton("🔙 بازگشت", "menu_image_tools")]
+            ])
+            await safe_edit_or_send(client, chat_id, msg, "🔄 **فرمت خروجی مورد نظر را انتخاب کنید:**", kb)
+            return
+
+        if data.startswith("itoolconv_"):
+            fmt = data.split("_")[1]
+            status_msg = await client.send_message(chat_id, f"⏳ در حال تبدیل تصویر به {fmt.upper()}...")
             try:
-                out_img = await asyncio.to_thread(itools.apply_aesthetic_filter, src, "hdr")
+                out_img = await asyncio.to_thread(itools.convert_image_format, src, fmt)
                 with open(out_img, "rb") as f:
-                    await client.send_photo(chat_id, photo=f, caption="✨ فیلتر HDR اعمال شد.")
+                    if fmt in ["png", "jpg", "webp"]:
+                        await client.send_photo(chat_id, photo=f, caption=f"🔄 **تبدیل به {fmt.upper()} انجام شد.**", reply_markup=menus.get_image_tools_keyboard(chat_id, get_user_lang))
+                    else:
+                        await client.send_document(chat_id, document=f, caption=f"🔄 **تبدیل به {fmt.upper()} انجام شد.**", reply_markup=menus.get_image_tools_keyboard(chat_id, get_user_lang))
                 await status_msg.delete()
-                if os.path.exists(out_img):
-                    os.remove(out_img)
+                if os.path.exists(out_img): os.remove(out_img)
+            except Exception as e:
+                await status_msg.edit_text(f"❌ خطا: {e}")
+            return
+
+        if data == "itool_crop":
+            kb = InlineKeyboard([
+                [InlineKeyboardButton("🔲 ۱:۱ مربع (پروفایل / آواتار)", "itoolcrop_1:1")],
+                [InlineKeyboardButton("🖥 ۱۶:۹ افقی (یوتیوب / دسکتاپ)", "itoolcrop_16:9")],
+                [InlineKeyboardButton("📱 ۹:۱۶ عمودی (استوری / ریلز)", "itoolcrop_9:16")],
+                [InlineKeyboardButton("🔙 بازگشت", "menu_image_tools")]
+            ])
+            await safe_edit_or_send(client, chat_id, msg, "📐 **نسبت ابعاد مورد نظر را انتخاب کنید:**", kb)
+            return
+
+        if data.startswith("itoolcrop_"):
+            ratio = data.split("_")[1]
+            status_msg = await client.send_message(chat_id, f"⏳ در حال برش با نسبت {ratio}...")
+            try:
+                out_img = await asyncio.to_thread(itools.crop_resize_preset, src, ratio)
+                with open(out_img, "rb") as f:
+                    await client.send_photo(chat_id, photo=f, caption=f"📐 **برش با نسبت {ratio} انجام شد.**", reply_markup=menus.get_image_tools_keyboard(chat_id, get_user_lang))
+                await status_msg.delete()
+                if os.path.exists(out_img): os.remove(out_img)
+            except Exception as e:
+                await status_msg.edit_text(f"❌ خطا: {e}")
+            return
+
+        if data == "itool_filter":
+            kb = InlineKeyboard([
+                [InlineKeyboardButton("✨ افزایش شارپنس و وضوح", "itoolfltr_sharpen")],
+                [InlineKeyboardButton("🌈 افکت HDR و تقویت رنگ", "itoolfltr_hdr")],
+                [InlineKeyboardButton("🎞 سیاه و سفید سینمایی", "itoolfltr_bw")],
+                [InlineKeyboardButton("☕ تم نوستالژی و وینتیج", "itoolfltr_vintage")],
+                [InlineKeyboardButton("🔙 بازگشت", "menu_image_tools")]
+            ])
+            await safe_edit_or_send(client, chat_id, msg, "🎨 **فیلتر مورد نظر را انتخاب کنید:**", kb)
+            return
+
+        if data.startswith("itoolfltr_"):
+            flt = data.split("_")[1]
+            status_msg = await client.send_message(chat_id, "🎨 در حال اعمال فیلتر...")
+            try:
+                out_img = await asyncio.to_thread(itools.apply_image_filter, src, flt)
+                with open(out_img, "rb") as f:
+                    await client.send_photo(chat_id, photo=f, caption="🎨 **فیلتر با موفقیت اعمال شد.**", reply_markup=menus.get_image_tools_keyboard(chat_id, get_user_lang))
+                await status_msg.delete()
+                if os.path.exists(out_img): os.remove(out_img)
             except Exception as e:
                 await status_msg.edit_text(f"❌ خطا در فیلتر: {e}")
             return
+
+        if data == "itool_watermark":
+            USER_STATES[chat_id] = "ITOOL_WATERMARK"
+            await safe_edit_or_send(
+                client, chat_id, msg,
+                "🏷 **درج واترمارک و متن روی عکس**\n\nمتن مورد نظر برای درج روی تصویر را ارسال کنید (مثلاً آیدی کانال یا اسم شما):\n`@tahasbot`",
+                InlineKeyboard([[InlineKeyboardButton("🔙 انصراف", "menu_image_tools")]])
+            )
+            return
+
+    # --- Google Images Callbacks ---
+    if data.startswith("gi_pg_"):
+        pg_str = data.replace("gi_pg_", "")
+        pg = int(pg_str) if pg_str.isdigit() else 0
+        await render_google_images_page(client, chat_id, page=pg, msg=msg)
+        return
+
+    if data.startswith("gi_dl_"):
+        idx_str = data.replace("gi_dl_", "")
+        idx = int(idx_str) if idx_str.isdigit() else 0
+        images = USER_DATA.get(chat_id, {}).get("gi_results", [])
+        if 0 <= idx < len(images):
+            img_url = images[idx]
+            status_msg = await client.send_message(chat_id, "⏳ در حال دانلود تصویر از گوگل...")
+            try:
+                out_p = os.path.join(MEDIA_DIR, f"gi_{int(time.time())}_{idx}.jpg")
+                await asyncio.to_thread(soc.download_url_to_file, img_url, out_p)
+                with open(out_p, "rb") as pf:
+                    await client.send_photo(chat_id, photo=pf, caption="🖼 دانلود شده از Google Images توسط @tahasbot")
+                await status_msg.delete()
+                if os.path.exists(out_p): os.remove(out_p)
+            except Exception as e:
+                await status_msg.edit_text(f"❌ خطا در دانلود تصویر: {e}")
+        return
+
+    if data == "gi_noop":
+        return
 
 
 # ----------------- MESSAGE DISPATCHER (TEXT & MEDIA) -----------------
@@ -3300,12 +4348,108 @@ async def on_message(client: Client, message: Message):
                 with open(saved_path, "wb") as f:
                     f.write(raw_bytes)
                 USER_DATA.setdefault(chat_id, {})["audio_path"] = saved_path
+
+                # If user was in AWAIT_AUDD_UPLOAD, recognize song!
+                if USER_STATES.get(chat_id) == "AWAIT_AUDD_UPLOAD":
+                    USER_STATES.pop(chat_id, None)
+                    await status_msg.edit_text("🎙 در حال شناسایی موزیک با Shazam...")
+                    clip_p = os.path.join(WORK_DIR, f"clip_{chat_id}_{int(time.time())}.mp3")
+                    await asyncio.to_thread(audd.extract_audio_clip_sync, saved_path, clip_p, 15)
+                    res = await asyncio.to_thread(audd.audd_recognize_sync, clip_p)
+                    if os.path.exists(clip_p):
+                        try: os.remove(clip_p)
+                        except OSError: pass
+
+                    if not res:
+                        await status_msg.edit_text("❌ متأسفانه آهنگی مطابق با این فایل شناسایی نشد.", reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 منوی اصلی", "menu_main")]]))
+                        return
+
+                    title = res["title"]
+                    artist = res["artist"]
+                    caption = (
+                        "🎵 **موزیک با موفقیت شناسایی شد!**\n\n"
+                        f"🎧 عنوان: **{title}**\n"
+                        f"👤 خواننده: **{artist}**\n"
+                        f"💿 آلبوم: {res.get('album', '')}\n\n"
+                        "می‌توانید نسخه ۳۲۰ این آهنگ را مستقیماً دریافت کنید:"
+                    )
+                    kb_dl = InlineKeyboard([
+                        [InlineKeyboardButton("📥 دانلود نسخه باکیفیت ۳۲۰", f"audd_dl_{title} - {artist}")],
+                        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]
+                    ])
+                    if res.get("cover"):
+                        try:
+                            r = requests.get(res["cover"], timeout=5)
+                            if r.status_code == 200:
+                                cov_p = os.path.join(MEDIA_DIR, f"cov_{chat_id}.jpg")
+                                with open(cov_p, "wb") as cf: cf.write(r.content)
+                                with open(cov_p, "rb") as cf:
+                                    await client.send_photo(chat_id, photo=cf, caption=caption, reply_markup=kb_dl)
+                                await status_msg.delete()
+                                if os.path.exists(cov_p): os.remove(cov_p)
+                                return
+                        except Exception: pass
+                    await status_msg.edit_text(caption, reply_markup=kb_dl)
+                    return
+
                 kb = menus.get_music_tools_keyboard(chat_id, get_user_lang)
-                await status_msg.edit_text("🎵 **فایل صوتی دریافت شد! افکت مورد نظر را انتخاب کنید:**", reply_markup=kb)
+                await status_msg.edit_text("🎵 **فایل صوتی دریافت شد! ابزار مورد نظر را انتخاب کنید:**", reply_markup=kb)
                 return
         except Exception as e:
             traceback.print_exc()
             await status_msg.edit_text(f"❌ خطا در دریافت فایل صوتی: {e}")
+            return
+
+    # 2. Check if user sent a Video or Video Document
+    if getattr(message, "video", None) or (getattr(message, "document", None) and (getattr(message.document, "mime_type", "") or "").startswith("video/")):
+        status_msg = await client.send_message(chat_id, "⏳ در حال دریافت ویدیو...")
+        try:
+            v_obj = getattr(message, "video", None) or getattr(message, "document", None)
+            file_id = getattr(v_obj, "id", None) or getattr(v_obj, "file_id", None)
+            if file_id:
+                raw_bytes = await client.download(file_id)
+                saved_path = os.path.join(VIDEO_EDIT_DIR, f"vid_{chat_id}_{int(time.time())}.mp4")
+                with open(saved_path, "wb") as f:
+                    f.write(raw_bytes)
+                USER_DATA.setdefault(chat_id, {})["vedit_path"] = saved_path
+
+                # If user was in AWAIT_AUDD_UPLOAD, recognize song inside video!
+                if USER_STATES.get(chat_id) == "AWAIT_AUDD_UPLOAD":
+                    USER_STATES.pop(chat_id, None)
+                    await status_msg.edit_text("🎙 در حال استخراج و شناسایی موزیک داخل ویدیو با Shazam...")
+                    clip_p = os.path.join(WORK_DIR, f"clip_{chat_id}_{int(time.time())}.mp3")
+                    await asyncio.to_thread(audd.extract_audio_clip_sync, saved_path, clip_p, 15)
+                    res = await asyncio.to_thread(audd.audd_recognize_sync, clip_p)
+                    if os.path.exists(clip_p):
+                        try: os.remove(clip_p)
+                        except OSError: pass
+
+                    if not res:
+                        await status_msg.edit_text("❌ متأسفانه آهنگی داخل این ویدیو شناسایی نشد.", reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 منوی اصلی", "menu_main")]]))
+                        return
+
+                    title = res["title"]
+                    artist = res["artist"]
+                    caption = (
+                        "🎵 **موزیک داخل ویدیو شناسایی شد!**\n\n"
+                        f"🎧 عنوان: **{title}**\n"
+                        f"👤 خواننده: **{artist}**\n"
+                        f"💿 آلبوم: {res.get('album', '')}\n\n"
+                        "می‌توانید نسخه ۳۲۰ این آهنگ را دریافت کنید:"
+                    )
+                    kb_dl = InlineKeyboard([
+                        [InlineKeyboardButton("📥 دانلود نسخه باکیفیت ۳۲۰", f"audd_dl_{title} - {artist}")],
+                        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", "menu_main")]
+                    ])
+                    await status_msg.edit_text(caption, reply_markup=kb_dl)
+                    return
+
+                kb = vtools.video_editor_kb()
+                await status_msg.edit_text("🎬 **ویدیو دریافت شد! ابزار ویرایش مورد نظر را انتخاب کنید:**", reply_markup=kb)
+                return
+        except Exception as e:
+            traceback.print_exc()
+            await status_msg.edit_text(f"❌ خطا در دریافت ویدیو: {e}")
             return
 
     # 2. Check if user sent a Photo
@@ -3582,11 +4726,294 @@ async def on_message(client: Client, message: Message):
         await render_ytm_albums_page(client, chat_id, page=0, msg=status)
         return
 
+    # Video Editor States
+    if state == "AWAIT_VEDIT_TRIM":
+        USER_STATES.pop(chat_id, None)
+        src = USER_DATA.get(chat_id, {}).get("vedit_path")
+        if not src or not os.path.exists(src):
+            await client.send_message(chat_id, "❌ ویدیویی برای برش یافت نشد. لطفاً ابتدا ویدیو ارسال کنید.")
+            return
+        raw_parts = [p.strip() for p in text.split("-") if p.strip()]
+        if len(raw_parts) == 2:
+            s_val, e_val = raw_parts[0], raw_parts[1]
+        else:
+            s_val, e_val = "00:00:00", text.strip()
+        status_msg = await client.send_message(chat_id, f"✂️ در حال برش ویدیو از {s_val} تا {e_val}...")
+        try:
+            res = await vtools.execute_video_action(src, "trim", {"trim_start": s_val, "trim_end": e_val})
+            out_p = res["output_path"]
+            USER_DATA.setdefault(chat_id, {})["vedit_path"] = out_p
+            with open(out_p, "rb") as vf:
+                await client.send_video(chat_id, video=vf, caption="✂️ **برش ویدیو انجام شد.**", reply_markup=vtools.video_editor_kb())
+            await status_msg.delete()
+        except Exception as e:
+            traceback.print_exc()
+            await status_msg.edit_text(f"❌ خطا در برش ویدیو: {e}")
+        return
+
+    if state == "AWAIT_VEDIT_WM":
+        USER_STATES.pop(chat_id, None)
+        src = USER_DATA.get(chat_id, {}).get("vedit_path")
+        if not src or not os.path.exists(src):
+            await client.send_message(chat_id, "❌ ویدیویی برای افزودن واترمارک یافت نشد. لطفاً ابتدا ویدیو ارسال کنید.")
+            return
+        status_msg = await client.send_message(chat_id, f"🏷 در حال درج واترمارک «{text}» روی ویدیو...")
+        try:
+            res = await vtools.execute_video_action(src, "watermark", {"watermark_text": text})
+            out_p = res["output_path"]
+            USER_DATA.setdefault(chat_id, {})["vedit_path"] = out_p
+            with open(out_p, "rb") as vf:
+                await client.send_video(chat_id, video=vf, caption=f"🏷 **واترمارک «{text}» درج شد.**", reply_markup=vtools.video_editor_kb())
+            await status_msg.delete()
+        except Exception as e:
+            traceback.print_exc()
+            await status_msg.edit_text(f"❌ خطا در درج واترمارک: {e}")
+        return
+
+    # Music Tools States
+    if state == "AWAIT_MTOOL_TRIM":
+        USER_STATES.pop(chat_id, None)
+        src = USER_DATA.get(chat_id, {}).get("audio_path")
+        if not src or not os.path.exists(src):
+            await client.send_message(chat_id, "⚠️ فایلی برای برش یافت نشد. لطفاً ابتدا یک فایل صوتی ارسال کنید.")
+            return
+        raw_parts = [p.strip() for p in text.split("-") if p.strip()]
+        s_val = raw_parts[0] if len(raw_parts) >= 1 else "0"
+        e_val = raw_parts[1] if len(raw_parts) >= 2 else "30"
+        status_msg = await client.send_message(chat_id, f"✂️ در حال برش موزیک از {s_val} تا {e_val}...")
+        try:
+            out_file = await asyncio.to_thread(mtools.trim_audio_file, src, s_val, e_val)
+            probe = await asyncio.to_thread(mtools.probe_audio_info, out_file)
+            with open(out_file, "rb") as af:
+                await client.send_audio(
+                    chat_id,
+                    audio=af,
+                    title=f"{probe.get('title','Ringtone')} (Trimmed)",
+                    duration=int(probe.get("duration", 0)),
+                    caption=f"✂️ **برش موزیک ({s_val} تا {e_val})**\n⚡️ پردازش شده توسط @tahasbot",
+                    reply_markup=menus.get_music_tools_keyboard(chat_id, get_user_lang)
+                )
+            await status_msg.delete()
+            if os.path.exists(out_file): os.remove(out_file)
+        except Exception as e:
+            await status_msg.edit_text(f"❌ خطا در برش صدا: {e}")
+        return
+
+    if state == "AWAIT_MTOOL_TAGS":
+        USER_STATES.pop(chat_id, None)
+        src = USER_DATA.get(chat_id, {}).get("audio_path")
+        if not src or not os.path.exists(src):
+            await client.send_message(chat_id, "⚠️ فایلی برای ویرایش تگ یافت نشد. لطفاً ابتدا یک فایل صوتی ارسال کنید.")
+            return
+        parts = [p.strip() for p in re.split(r"[-–—|]+", text) if p.strip()]
+        title_new = parts[0] if parts else text
+        artist_new = parts[1] if len(parts) > 1 else ""
+        status_msg = await client.send_message(chat_id, "🏷 در حال به‌روزرسانی مشخصات فایل صوتی...")
+        try:
+            await asyncio.to_thread(mtools.update_audio_metadata, src, title=title_new, artist=artist_new)
+            probe = await asyncio.to_thread(mtools.probe_audio_info, src)
+            with open(src, "rb") as af:
+                await client.send_audio(
+                    chat_id,
+                    audio=af,
+                    title=title_new,
+                    performer=artist_new,
+                    caption=f"🏷 **مشخصات آهنگ تغییر یافت:**\n🎵 {title_new}\n👤 {artist_new}",
+                    reply_markup=menus.get_music_tools_keyboard(chat_id, get_user_lang)
+                )
+            await status_msg.delete()
+        except Exception as e:
+            await status_msg.edit_text(f"❌ خطا در ویرایش تگ: {e}")
+        return
+
+    # Image Tools States
+    if state == "ITOOL_WATERMARK":
+        USER_STATES.pop(chat_id, None)
+        src = USER_DATA.get(chat_id, {}).get("image_path")
+        if not src or not os.path.exists(src):
+            await client.send_message(chat_id, "⚠️ تصویری برای درج واترمارک یافت نشد. لطفاً ابتدا عکس ارسال کنید.")
+            return
+        status_msg = await client.send_message(chat_id, f"🏷 در حال درج واترمارک «{text}»...")
+        try:
+            out_img = await asyncio.to_thread(itools.add_text_watermark, src, text)
+            with open(out_img, "rb") as f:
+                await client.send_photo(
+                    chat_id, photo=f,
+                    caption=f"🏷 **واترمارک درج شد:** `{text}`",
+                    reply_markup=menus.get_image_tools_keyboard(chat_id, get_user_lang)
+                )
+            await status_msg.delete()
+            if os.path.exists(out_img): os.remove(out_img)
+        except Exception as e:
+            await status_msg.edit_text(f"❌ خطا در درج واترمارک: {e}")
+        return
+
+    # User Playlists System
+    if state == "AWAIT_PLAYLIST_NAME":
+        USER_STATES.pop(chat_id, None)
+        pl_name = text.strip()[:40]
+        if not pl_name:
+            await client.send_message(chat_id, "❌ نام پلی‌لیست نمی‌تواند خالی باشد.")
+            return
+        pl_id = f"pl_{chat_id}_{int(time.time())}"
+        pl_doc = {
+            "playlist_id": pl_id,
+            "chat_id": chat_id,
+            "name": pl_name,
+            "tracks": [],
+            "created_at": int(time.time())
+        }
+        if db is not None:
+            try:
+                db.user_playlists.insert_one(pl_doc)
+            except Exception as e:
+                print(f"Error saving playlist: {e}", flush=True)
+        await client.send_message(
+            chat_id,
+            f"✅ پلی‌لیست «**{pl_name}**» با موفقیت ساخته شد!",
+            reply_markup=InlineKeyboard([
+                [InlineKeyboardButton("🎵 مشاهده پلی‌لیست‌های من", "menu_playlists")],
+                [InlineKeyboardButton("🔙 منوی اصلی", "menu_main")]
+            ])
+        )
+        return
+
+    # Support & Contact Admin
+    if state == "AWAIT_SUPPORT_MSG":
+        USER_STATES.pop(chat_id, None)
+        t_id = f"TICK_{int(time.time())}_{chat_id % 10000}"
+        ticket_doc = {
+            "ticket_id": t_id,
+            "chat_id": chat_id,
+            "username": username,
+            "text": text,
+            "created_at": int(time.time()),
+            "status": "open"
+        }
+        if db is not None:
+            try:
+                db.support_tickets.insert_one(ticket_doc)
+            except Exception as e:
+                print(f"Error saving support ticket: {e}", flush=True)
+
+        try:
+            owner_kb = InlineKeyboard([[InlineKeyboardButton("✍️ پاسخ به پیام", f"adm_rep_{t_id}")]])
+            await client.send_message(
+                OWNER_ID,
+                f"📩 **تیکت پشتیبانی جدید:**\n\n"
+                f"👤 از طرف: `{chat_id}` (@{username or 'بدون نام کاربری'})\n"
+                f"🆔 شناسه: `{t_id}`\n\n"
+                f"💬 متن پیام:\n{text}",
+                reply_markup=owner_kb
+            )
+        except Exception as e:
+            print(f"Error notifying owner of support ticket: {e}", flush=True)
+
+        await client.send_message(
+            chat_id,
+            "✅ **پیام شما با موفقیت برای مدیریت ارسال شد.**\nپاسخ به زودی از طریق همین ربات برای شما ارسال خواهد شد.",
+            reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 منوی اصلی", "menu_main")]])
+        )
+        return
+
+    if state and state.startswith("AWAIT_ADMIN_REPLY_") and is_admin(chat_id, username):
+        t_id = state.replace("AWAIT_ADMIN_REPLY_", "")
+        USER_STATES.pop(chat_id, None)
+        ticket = db.support_tickets.find_one({"ticket_id": t_id}) if db is not None else None
+        target_uid = ticket.get("chat_id") if ticket else None
+        if target_uid:
+            try:
+                await client.send_message(
+                    target_uid,
+                    f"📬 **پاسخ پشتیبانی به پیام شما:**\n\n{text}"
+                )
+                if db is not None:
+                    db.support_tickets.update_one({"ticket_id": t_id}, {"$set": {"status": "answered", "reply": text, "answered_at": int(time.time())}})
+                await client.send_message(
+                    chat_id,
+                    f"✅ پاسخ شما برای کاربر `{target_uid}` ارسال شد.",
+                    reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 بازگشت به پیام‌ها", "adm_sup_0")]])
+                )
+            except Exception as e:
+                await client.send_message(chat_id, f"❌ خطا در ارسال پیام به کاربر: {e}")
+        else:
+            await client.send_message(chat_id, "❌ کاربر مرتبط با این تیکت پیدا نشد.")
+        return
+
+    # Image & Social Search States
+    if state == "AWAIT_RD_SEARCH":
+        USER_STATES.pop(chat_id, None)
+        status = await client.send_message(chat_id, f"🤖 در حال جستجو در ردیت برای «{text}»...")
+        USER_DATA.setdefault(chat_id, {})["rd_query"] = text
+        USER_DATA.setdefault(chat_id, {})["rd_posts"] = []
+        await render_reddit_page(client, chat_id, page=0, msg=status)
+        return
+
+    if state == "AWAIT_PT_SEARCH":
+        USER_STATES.pop(chat_id, None)
+        status = await client.send_message(chat_id, f"📌 در حال جستجوی پین‌ها برای «{text}» در پینترست...")
+        USER_DATA.setdefault(chat_id, {})["pt_query"] = text
+        USER_DATA.setdefault(chat_id, {})["pt_pins"] = []
+        await render_pinterest_page(client, chat_id, page=0, msg=status)
+        return
+
+    if state == "AWAIT_PX_SEARCH":
+        USER_STATES.pop(chat_id, None)
+        status = await client.send_message(chat_id, f"🔍 در حال جستجوی تصاویر باکیفیت برای «{text}» در پکسلز...")
+        USER_DATA.setdefault(chat_id, {})["px_query"] = text
+        await render_pexels_page(client, chat_id, page=1, msg=status)
+        return
+
+    if state == "AWAIT_GI_SEARCH":
+        USER_STATES.pop(chat_id, None)
+        status = await client.send_message(chat_id, f"🔍 در حال جستجوی تصاویر برای «{text}» در گوگل...")
+        USER_DATA.setdefault(chat_id, {})["gi_query"] = text
+        USER_DATA.setdefault(chat_id, {})["gi_results"] = []
+        await render_google_images_page(client, chat_id, page=0, msg=status)
+        return
+
+    if state == "AWAIT_AUDD_UPLOAD":
+        USER_STATES.pop(chat_id, None)
+        await handle_music_search(client, message, text)
+        return
+
+    # AI Chat Assistant
+    if state == "AI_CHAT":
+        if text in ["/exit", "خروج", "انصراف", "منوی اصلی", "/start", "/help"]:
+            USER_STATES.pop(chat_id, None)
+            name = (message.author.first_name if message.author else "") or "کاربر"
+            w_text = menus.get_menu_text("main_menu_welcome", lang=lang, name=name)
+            kb = menus.get_main_keyboard(chat_id, get_user_lang, is_admin)
+            await client.send_message(chat_id, "✅ با موفقیت از گفتگوی هوش مصنوعی خارج شدید.\n\n" + w_text, reply_markup=kb)
+            return
+
+        history = USER_DATA.setdefault(chat_id, {}).setdefault("ai_history", [])
+        history.append({"role": "user", "content": text})
+        status_msg = await client.send_message(chat_id, "🧠 در حال تفکر...")
+
+        try:
+            res, provider = await asyncio.to_thread(ai_chat.ask_ai, AI_SYSTEM_PROMPT, history, [])
+            ans = res.get("content") or "پاسخی دریافت نشد."
+            history.append({"role": "assistant", "content": ans})
+            if len(history) > 20:
+                del history[:-20]
+
+            kb = InlineKeyboard([[InlineKeyboardButton("🔙 خروج از هوش مصنوعی", "ai_exit")]])
+            await status_msg.edit_text(ans, reply_markup=kb)
+            log_activity(chat_id, "ai_chat", text[:30])
+        except Exception as e:
+            traceback.print_exc()
+            await status_msg.edit_text(
+                "❌ دستیار هوش مصنوعی موقتاً در دسترس نیست. لطفاً کمی بعد دوباره پیام دهید.",
+                reply_markup=InlineKeyboard([[InlineKeyboardButton("🔙 خروج", "ai_exit")]])
+            )
+        return
+
     if state == "AWAIT_AI_QUERY":
         USER_STATES.pop(chat_id, None)
         status_msg = await client.send_message(chat_id, "🤖 در حال پردازش توسط هوش مصنوعی...")
         reply_txt = (
-            f"🧠 **پاسخ دستیار هوش مصنوعی TMulti:**\n\n"
+            f"🧠 **پاسخ دستیار هوش مصنوعی TahasBot:**\n\n"
             f"درخواست شما برای «**{text}**» دریافت شد.\n\n"
             f"ربات طه به صورت هوشمند برای دانلود و پردازش با کیفیت بالا از اینستاگرام، تیک‌تاک، یوتیوب، اسپاتیفای و ساندکلاد آماده است.\n"
             f"برای دریافت هر آهنگ یا فایل رسانه‌ای، کافیست لینک آن یا نام اثر را ارسال کنید!"
@@ -3611,6 +5038,93 @@ async def on_message(client: Client, message: Message):
         return
 
     # 4. Check for URL patterns
+    # --- Twitter / X URL ---
+    m_tw = soc.TWITTER_URL_RE.search(text)
+    if m_tw or ("twitter.com" in text or "x.com" in text):
+        user_tw = m_tw.group(1) if m_tw else "user"
+        tweet_id = m_tw.group(2) if m_tw else ""
+        if not tweet_id:
+            m_tid = re.search(r"status(?:es)?/(\d+)", text)
+            tweet_id = m_tid.group(1) if m_tid else ""
+        if tweet_id:
+            status_msg = await message.reply("⏳ در حال دریافت رسانه از توییتر (X)...")
+            try:
+                data = await asyncio.to_thread(soc.twitter_fetch_sync, user_tw, tweet_id)
+                files = data.get("files", [])
+                cap = (data.get("caption") or "")[:200]
+                if not cap:
+                    cap = "⚡️ دانلود شده از Twitter/X توسط @tahasbot"
+                if not files:
+                    res = await asyncio.to_thread(download_social_media_sync, text, "tw")
+                    if res and res.get("file"):
+                        files = [res["file"]]
+
+                if files:
+                    await status_msg.edit_text("⬆️ در حال ارسال به بله...")
+                    for f in files:
+                        if f.lower().endswith((".mp4", ".mov", ".mkv")):
+                            with open(f, "rb") as vf:
+                                await client.send_video(chat_id, video=vf, caption=cap)
+                        else:
+                            with open(f, "rb") as pf:
+                                await client.send_photo(chat_id, photo=pf, caption=cap)
+                        if os.path.exists(f):
+                            try: os.remove(f)
+                            except OSError: pass
+                    await status_msg.delete()
+                    log_activity(chat_id, "twitter_download", text)
+                    return
+                else:
+                    await status_msg.edit_text("❌ رسانه‌ای در این توییت یافت نشد یا دسترسی به آن محدود است.")
+                    return
+            except Exception as e:
+                traceback.print_exc()
+                await status_msg.edit_text(f"❌ خطا در دانلود توییت: {e}")
+                return
+
+    # --- Reddit URL ---
+    if "reddit.com" in text or "redd.it" in text:
+        m_rd = re.search(r"comments/([a-zA-Z0-9]+)", text)
+        post_id = m_rd.group(1) if m_rd else None
+        if not post_id:
+            m_short = re.search(r"redd\.it/([a-zA-Z0-9]+)", text)
+            post_id = m_short.group(1) if m_short else None
+
+        if post_id:
+            status_msg = await message.reply("⏳ در حال دریافت پست از ردیت...")
+            try:
+                res = await asyncio.to_thread(soc.download_reddit_post_sync, post_id)
+                files = res.get("files", [])
+                title = res.get("title", "")
+                cap = f"🤖 **{title}**\n⚡️ دانلود شده از Reddit توسط @tahasbot" if title else "⚡️ دانلود شده از Reddit توسط @tahasbot"
+                if not files:
+                    res2 = await asyncio.to_thread(download_social_media_sync, text, "rd")
+                    if res2 and res2.get("file"):
+                        files = [res2["file"]]
+
+                if files:
+                    await status_msg.edit_text("⬆️ در حال ارسال به بله...")
+                    for f in files:
+                        if f.lower().endswith((".mp4", ".mov", ".mkv")):
+                            with open(f, "rb") as vf:
+                                await client.send_video(chat_id, video=vf, caption=cap)
+                        else:
+                            with open(f, "rb") as pf:
+                                await client.send_photo(chat_id, photo=pf, caption=cap)
+                        if os.path.exists(f):
+                            try: os.remove(f)
+                            except OSError: pass
+                    await status_msg.delete()
+                    log_activity(chat_id, "reddit_download", text)
+                    return
+                else:
+                    await status_msg.edit_text("❌ رسانه‌ای در این پست ردیت یافت نشد.")
+                    return
+            except Exception as e:
+                traceback.print_exc()
+                await status_msg.edit_text(f"❌ خطا در دانلود از ردیت: {e}")
+                return
+
     # --- YouTube URL (Direct link triggers interactive Video Card with format & quality selection) ---
     if "youtube.com" in text or "youtu.be" in text:
         if "music.youtube.com" in text:
@@ -3682,6 +5196,30 @@ async def on_message(client: Client, message: Message):
 
     # --- Pinterest URL ---
     if "pinterest.com" in text or "pin.it" in text:
+        m_pin = re.search(r"pin/(\d+)", text)
+        if m_pin:
+            pin_id = m_pin.group(1)
+            status_msg = await message.reply("⏳ در حال دانلود پین از پینترست...")
+            try:
+                res = await asyncio.to_thread(soc.pinterest_pin_download_sync, pin_id)
+                if res and res.get("path"):
+                    fpath = res["path"]
+                    cap = f"📌 **{res.get('title') or 'Pinterest'}**\n⚡️ دانلود شده توسط @tahasbot"
+                    if res["type"] == "video":
+                        with open(fpath, "rb") as vf:
+                            await client.send_video(chat_id, video=vf, caption=cap)
+                    else:
+                        with open(fpath, "rb") as pf:
+                            await client.send_photo(chat_id, photo=pf, caption=cap)
+                    await status_msg.delete()
+                    log_activity(chat_id, "pinterest_download", text)
+                    if os.path.exists(fpath):
+                        try: os.remove(fpath)
+                        except OSError: pass
+                    return
+            except Exception as e:
+                print(f"Direct pin download error: {e}", flush=True)
+
         await handle_social_media_download(client, message, text, platform="Pinterest")
         return
 
