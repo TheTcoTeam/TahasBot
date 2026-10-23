@@ -337,16 +337,26 @@ LOCAL_META = {}
 
 try:
     if MONGO_URI:
-        db_client = MongoClient(
-            MONGO_URI,
-            maxPoolSize=50,
-            minPoolSize=5,
-            maxIdleTimeMS=45000,
-            serverSelectionTimeoutMS=5000,
-            connectTimeoutMS=5000,
-            socketTimeoutMS=10000
-        )
-        db_client.admin.command('ping')
+        # Render cold starts sometimes race DNS/Atlas; a single failure here
+        # used to leave the bot without a database until the next restart.
+        for _attempt in range(5):
+            try:
+                db_client = MongoClient(
+                    MONGO_URI,
+                    maxPoolSize=50,
+                    minPoolSize=5,
+                    maxIdleTimeMS=45000,
+                    serverSelectionTimeoutMS=5000,
+                    connectTimeoutMS=5000,
+                    socketTimeoutMS=10000
+                )
+                db_client.admin.command('ping')
+                break
+            except Exception as _pe:
+                if _attempt == 4:
+                    raise
+                print(f"MongoDB not reachable yet ({str(_pe)[:80]}); retrying...", flush=True)
+                time.sleep(3 * (_attempt + 1))
         _db = db_client[os.environ.get("MONGO_DB_NAME", "telebot_db")]
         music_cache = _db.music_cache
         history_col = _db.history

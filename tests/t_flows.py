@@ -5,12 +5,17 @@ import sys
 import time
 
 import driver as D
-from driver import buttons, click, msg_from_call, ncalls, summarize, wait
+from driver import buttons, click, msg_from_call, ncalls, summarize
+from driver import wait as _wait
 
 UID = int(os.environ.get("FLOW_UID", "222"))
 USER = {"id": UID, "is_bot": False, "first_name": "Flow", "username": "flow"}
 CHAT = {"id": UID, "type": "private", "first_name": "Flow"}
 RESULTS = []
+
+
+def wait(*a, **kw):
+    return _wait(*a, chat_id=UID, **kw)
 
 
 def send(text=None, **kw):
@@ -94,12 +99,11 @@ def main(which):
         time.sleep(3)
 
     if "ig" in which:
-        flow_link("instagram reel", "https://www.instagram.com/reel/DPfDZ9yjB0k/")
-        flow_link("instagram post", "https://www.instagram.com/p/DPiGNumjCK5/")
+        flow_link("instagram reel", "https://www.instagram.com/reel/C-X-0s-M8iI/")
     if "tt" in which:
-        flow_link("tiktok video", "https://www.tiktok.com/@khaby.lame/video/7491624485342071062")
+        flow_link("tiktok video", "https://www.tiktok.com/@tiktok/video/7106594312292453678")
     if "sp" in which:
-        flow_link("spotify track link", "https://open.spotify.com/track/7qiZfU4dY1lWllzX7mPBI3", ("sendAudio",))
+        flow_link("spotify track link", "https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b", ("sendAudio",))
     if "sc" in which:
         flow_link("soundcloud link", "https://soundcloud.com/octobersveryown/drake-gods-plan", ("sendAudio",))
     if "ytm" in which:

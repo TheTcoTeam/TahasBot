@@ -52,14 +52,21 @@ def click(message: dict, data: str, user=None):
                                        "message": message, "chat_instance": "x"}})
 
 
-def wait(n0, until=None, timeout=60, quiet=2.0):
+def _for_chat(cs, chat_id):
+    if chat_id is None:
+        return cs
+    return [c for c in cs if str(c["params"].get("chat_id")) == str(chat_id) or
+            (c["method"] == "answerCallbackQuery")]
+
+
+def wait(n0, until=None, timeout=60, quiet=2.0, chat_id=None):
     """Collect calls after index n0 until `until(calls)` is true, or the bot
     has been quiet for `quiet` seconds after its first call."""
     t0 = time.time()
     last_len, last_change = 0, time.time()
     while time.time() - t0 < timeout:
         cs = calls_since(n0)
-        cs = [c for c in cs if c["method"] != "getUpdates"]
+        cs = _for_chat([c for c in cs if c["method"] != "getUpdates"], chat_id)
         if until and until(cs):
             return cs
         if len(cs) != last_len:
@@ -67,7 +74,7 @@ def wait(n0, until=None, timeout=60, quiet=2.0):
         elif cs and not until and time.time() - last_change > quiet:
             return cs
         time.sleep(0.25)
-    return [c for c in calls_since(n0) if c["method"] != "getUpdates"]
+    return _for_chat([c for c in calls_since(n0) if c["method"] != "getUpdates"], chat_id)
 
 
 def message_of(call):
