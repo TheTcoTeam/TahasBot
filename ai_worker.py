@@ -217,9 +217,14 @@ def burn_subtitles(video_path, srt_path):
     """Hardcode subtitles so they show in Telegram's player, not just external ones."""
     out = f"{WORK}/subtitled.mp4"
     srt_escaped = srt_path.replace("\\", "/").replace(":", r"\:")
-    style = "FontName=Noto Sans,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H90000000,BorderStyle=3"
+    # Static ffmpeg builds have no usable fontconfig setup, so point libass at
+    # the fonts the workflow downloaded, and use a Persian-capable face.
+    font = "Noto Naskh Arabic" if TARGET_LANG in ("fa", "ar", "ur") else "Noto Sans"
+    style = f"FontName={font},FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H90000000,BorderStyle=3"
+    fonts_dir = os.environ.get("FONTS_DIR") or os.path.expanduser("~/.fonts")
+    fonts_opt = f":fontsdir='{fonts_dir}'" if os.path.isdir(fonts_dir) else ""
     run(["ffmpeg", "-y", "-loglevel", "error", "-i", video_path,
-         "-vf", f"subtitles='{srt_escaped}':force_style='{style}'",
+         "-vf", f"subtitles='{srt_escaped}'{fonts_opt}:force_style='{style}'",
          "-c:a", "copy", "-preset", "veryfast", out])
     return out
 
