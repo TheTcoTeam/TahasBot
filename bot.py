@@ -3420,12 +3420,10 @@ def yt_client_timing(yt_id: str = "JGwWNGJdvx8") -> dict:
     out = {}
     variants = {
         "current": {},
+        "current_again": {},
+        "no_pot": {"fetch_pot": ["never"], "getpot_bgutil_baseurl": ["http://127.0.0.1:1"]},
+        "no_pot_again": {"fetch_pot": ["never"], "getpot_bgutil_baseurl": ["http://127.0.0.1:1"]},
         "web_music": {"player_client": ["web_music"]},
-        "tv": {"player_client": ["tv"]},
-        "tv_simply": {"player_client": ["tv_simply"]},
-        "mweb": {"player_client": ["mweb"]},
-        "android_vr": {"player_client": ["android_vr"]},
-        "web_safari": {"player_client": ["web_safari"]},
     }
     for name, extra in variants.items():
         opts = _yt_dl_opts("music_downloads/probe.%(ext)s")
@@ -3435,7 +3433,7 @@ def yt_client_timing(yt_id: str = "JGwWNGJdvx8") -> dict:
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-            out[name] = f"ok {time.time() - t0:.1f}s fmt={info.get('format_id')}"
+            out[name] = f"ok {time.time() - t0:.1f}s fmt={info.get('format_id')} cachedir={ydl.params.get('cachedir')}"
         except Exception as e:
             out[name] = f"fail {time.time() - t0:.1f}s {str(e)[:60]}"
     return out
