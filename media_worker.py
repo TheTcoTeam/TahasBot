@@ -24,7 +24,9 @@ AUDIO_TITLE = os.environ.get("AUDIO_TITLE", "")
 REPLY_MARKUP = os.environ.get("REPLY_MARKUP", "")
 FONT_LATIN = os.environ.get("FONT_LATIN", "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf")
 FONT_ARABIC = os.environ.get("FONT_ARABIC", "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf")
-LIMIT = 47 * 1024 * 1024
+UPLOAD_LIMIT_MB = int(os.environ.get('UPLOAD_LIMIT_MB') or 50)
+LIMIT = max(4, UPLOAD_LIMIT_MB - 3) * 1024 * 1024
+SIGNATURE = os.environ.get('SIGNATURE', '')
 
 
 def api(method, data=None, files=None, timeout=60):
@@ -105,15 +107,15 @@ def main():
         notify_failure(f"❌ ویرایش ویدیو ناموفق بود.\n{str(e)[:200]}")
         return 1
 
-    if os.path.getsize(out) > 50 * 1024 * 1024:
-        notify_failure("❌ فایل نهایی بیشتر از ۵۰ مگابایت است و بله اجازه ارسال آن را نمی‌دهد.")
+    if os.path.getsize(out) > UPLOAD_LIMIT_MB * 1024 * 1024:
+        notify_failure(f"❌ فایل نهایی بیشتر از {UPLOAD_LIMIT_MB} مگابایت (حد مجاز ارسال) است.")
         return 1
 
     method, field = {"audio": ("sendAudio", "audio"), "animation": ("sendAnimation", "animation")}.get(
         SEND_AS, ("sendVideo", "video"))
-    data = {"chat_id": str(CHAT_ID), "caption": CAPTION}
+    data = {"chat_id": str(CHAT_ID), "caption": (CAPTION + "\n\n" + SIGNATURE).strip() if SIGNATURE else CAPTION}
     if SEND_AS == "audio":
-        data.update({"title": AUDIO_TITLE or "Audio", "performer": "TMulti"})
+        data.update({"title": AUDIO_TITLE or "Audio", "performer": "Taha Bot"})
     if SEND_AS == "video":
         data["duration"] = str(int(duration(out)))
         data["supports_streaming"] = "true"

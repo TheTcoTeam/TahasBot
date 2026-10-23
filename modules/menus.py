@@ -8,19 +8,19 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 MENU_STRINGS = {
     "main_menu_welcome": {
-        "fa": "👋 سلام **{name}** عزیز! به ربات همه‌کاره **TMulti** خوش آمدید.\n\n"
+        "fa": "👋 سلام **{name}** عزیز! به ربات همه‌کاره **بات طاها** خوش آمدید.\n\n"
               "⚡️ شما می‌توانید هر لینکی (اینستاگرام، تیک‌تاک، یوتیوب، اسپاتیفای، ساندکلاد، ردیت، پینترست و...) "
               "را مستقیماً ارسال کنید تا بلافاصله دانلود شود.\n\n"
               "🎛 یا از منوی زیر ابزار یا پلتفرم مورد نظر خود را انتخاب کنید:",
-        "en": "👋 Hello **{name}**! Welcome to **TMulti** Bot.\n\n"
+        "en": "👋 Hello **{name}**! Welcome to **Taha Bot** Bot.\n\n"
               "⚡️ Send any link directly (Instagram, TikTok, YouTube, Spotify, SoundCloud, Reddit, Pinterest...) "
               "and I will download it immediately.\n\n"
               "🎛 Or choose one of the options below to explore features:",
-        "ru": "👋 Привет, **{name}**! Добро пожаловать в бота **TMulti**.\n\n"
+        "ru": "👋 Привет, **{name}**! Добро пожаловать в бота **Taha Bot**.\n\n"
               "⚡️ Отправьте любую ссылку (Instagram, TikTok, YouTube, Spotify, SoundCloud, Reddit, Pinterest...), "
               "и я мгновенно скачаю её.\n\n"
               "🎛 Или выберите категорию ниже:",
-        "es": "👋 ¡Hola **{name}**! Bienvenido al bot **TMulti**.\n\n"
+        "es": "👋 ¡Hola **{name}**! Bienvenido al bot **Taha Bot**.\n\n"
               "⚡️ Envía cualquier enlace (Instagram, TikTok, YouTube, Spotify, SoundCloud, Reddit, Pinterest...) "
               "y lo descargaré de inmediato.\n\n"
               "🎛 O elige una de las siguientes opciones:"
@@ -39,7 +39,7 @@ MENU_STRINGS = {
     "btn_image_tools": {"fa": "🎨 ابزارهای تصویر", "en": "🎨 Image Tools", "ru": "🎨 Инструменты фото", "es": "🎨 Herramientas de Imagen"},
     "btn_my_playlists": {"fa": "📃 پلی‌لیست‌های من", "en": "📃 My Playlists", "ru": "📃 Мои плейлисты", "es": "📃 Mis listas"},
     "btn_my_profile": {"fa": "👤 پروفایل من", "en": "👤 My Profile", "ru": "👤 Мой профиль", "es": "👤 Mi perfil"},
-    "btn_tmulti_ai": {"fa": "🤖 دستیار هوش مصنوعی TMulti", "en": "🤖 TMulti AI Assistant", "ru": "🤖 ИИ-ассистент TMulti", "es": "🤖 Asistente de IA TMulti"},
+    "btn_tmulti_ai": {"fa": "🤖 دستیار هوش مصنوعی بات طاها", "en": "🤖 Taha Bot AI Assistant", "ru": "🤖 ИИ-ассистент بات طاها", "es": "🤖 Asistente de IA بات طاها"},
     "btn_message_dev": {"fa": "📩 پیام به سازنده", "en": "📩 Message Developer", "ru": "📩 Сообщение разработчику", "es": "📩 Mensaje al desarrollador"},
     "btn_settings": {"fa": "⚙️ تنظیمات", "en": "⚙️ Settings", "ru": "⚙️ Настройки", "es": "⚙️ Configuración"},
     "btn_help": {"fa": "❓ راهنمای کامل", "en": "❓ Full Help Guide", "ru": "❓ Полная помощь", "es": "❓ Guía de Ayuda"},
@@ -105,7 +105,7 @@ def get_main_keyboard(chat_id, get_lang_fn=None) -> InlineKeyboardMarkup:
             InlineKeyboardButton(b("btn_my_playlists"), callback_data="menu_playlists"),
             InlineKeyboardButton(b("btn_my_profile"), callback_data="menu_profile")
         ],
-        # Row 8: TMulti AI (Full Width)
+        # Row 8: Taha Bot AI (Full Width)
         [
             InlineKeyboardButton(b("btn_tmulti_ai"), callback_data="menu_ai")
         ],

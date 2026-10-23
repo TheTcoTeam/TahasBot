@@ -51,6 +51,15 @@ on:
         required: false
         type: string
 
+      UPLOAD_LIMIT_MB:
+        description: 'Bale upload limit set in the admin panel'
+        required: false
+        type: string
+      SIGNATURE:
+        description: 'Caption signature'
+        required: false
+        type: string
+
 jobs:
   download_and_send:
     runs-on: ubuntu-latest
@@ -132,4 +141,6 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           BOT_USERNAME: ${{ vars.BOT_USERNAME || 'tahasbot' }}
           POT_PROVIDER_URL: http://127.0.0.1:4416
+          UPLOAD_LIMIT_MB: ${{ inputs.UPLOAD_LIMIT_MB }}
+          SIGNATURE: ${{ inputs.SIGNATURE }}
         run: python worker.py

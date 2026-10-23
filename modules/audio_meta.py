@@ -22,7 +22,7 @@ import tempfile
 try:
     from mutagen import File as MutagenFile
     from mutagen.id3 import (ID3, ID3NoHeaderError, TIT2, TPE1, TPE2, TALB,
-                             TRCK, TDRC, APIC)
+                             TRCK, TDRC, APIC, COMM, TPUB)
     from mutagen.mp4 import MP4, MP4Cover
     from mutagen.flac import FLAC, Picture
     import base64
@@ -31,6 +31,8 @@ except ImportError:  # pragma: no cover
     HAVE_MUTAGEN = False
 
 FFMPEG = shutil.which("ffmpeg")
+# Written into every file so a forwarded or saved song shows where it came from.
+SIGNATURE = os.environ.get("TAG_SIGNATURE", "Downloaded with @tahasbot on Bale")
 AUDIO_EXTS = (".mp3", ".m4a", ".mp4", ".aac", ".ogg", ".opus", ".flac", ".wav", ".webm")
 
 
@@ -193,6 +195,9 @@ def write_tags(path: str, title: str = "", artist: str = "", album: str = "", ye
             if cover:
                 tags.delall("APIC")
                 tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=cover))
+            if SIGNATURE:
+                tags.setall("COMM", [COMM(encoding=3, lang="eng", desc="", text=SIGNATURE)])
+                tags.setall("TPUB", [TPUB(encoding=3, text=SIGNATURE)])
             tags.save(path, v2_version=3)
             return True
         if ext in (".m4a", ".mp4", ".aac"):
@@ -212,6 +217,8 @@ def write_tags(path: str, title: str = "", artist: str = "", album: str = "", ye
                 mp4.tags["trkn"] = [(int(track), int(total or 0))]
             if cover:
                 mp4.tags["covr"] = [MP4Cover(cover, imageformat=MP4Cover.FORMAT_JPEG)]
+            if SIGNATURE:
+                mp4.tags["\xa9cmt"] = [SIGNATURE]
             mp4.save()
             return True
         if ext in (".ogg", ".opus", ".flac"):

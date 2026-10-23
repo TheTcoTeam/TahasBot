@@ -246,7 +246,8 @@ def burn_subtitles(video_path, srt_path):
     return out
 
 
-BALE_LIMIT = 47 * 1024 * 1024
+UPLOAD_LIMIT_MB = int(os.environ.get('UPLOAD_LIMIT_MB') or 50)
+BALE_LIMIT = max(4, UPLOAD_LIMIT_MB - 3) * 1024 * 1024
 
 
 def fit_for_bale(path):
@@ -271,6 +272,8 @@ async def upload(files, caption):
         return
     app = Client("ai_worker", api_id=API_ID, api_hash=API_HASH,
                  bot_token=BOT_TOKEN, in_memory=True, max_concurrent_transmissions=8)
+    app.upload_limit = UPLOAD_LIMIT_MB * 1024 * 1024
+    app.caption_signature = os.environ.get("SIGNATURE", "")
     await app.start()
     try:
         for idx, path in enumerate(files):

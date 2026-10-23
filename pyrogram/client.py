@@ -110,6 +110,52 @@ def _short(n=10):
     return "".join(random.choices(string.ascii_letters + string.digits, k=n))
 
 
+_PLATFORMS = [
+    ("ytmusic", ("music.youtube.com",)),
+    ("youtube", ("youtube.com", "youtu.be")),
+    ("instagram", ("instagram.com", "instagr.am")),
+    ("tiktok", ("tiktok.com",)),
+    ("spotify", ("spotify.com", "spotify.link")),
+    ("soundcloud", ("soundcloud.com",)),
+    ("pinterest", ("pinterest.", "pin.it")),
+    ("reddit", ("reddit.com", "redd.it")),
+    ("twitter", ("twitter.com", "x.com")),
+    ("deezer", ("deezer.com", "deezer.page.link")),
+]
+
+
+def link_platform(text: str):
+    m = re.search(r"https?://\S+|(?:www\.)?[\w.-]+\.(?:com|it|be|link)/\S*", text or "", re.I)
+    if not m:
+        return None
+    host = m.group(0).lower()
+    for name, hosts in _PLATFORMS:
+        if any(h in host for h in hosts):
+            return name
+    return "other"
+
+
+def feature_key(data: str) -> str:
+    """Stable key for a callback_data shape: ids, page numbers and other
+    variable parts are wildcarded so one toggle covers every instance of a
+    button (e.g. every 'lyrics_<id>')."""
+    if data.startswith("_iq:"):
+        rest = data[4:].strip()
+        return "inline:" + (rest.split(":")[0].split()[0] if rest else "menu")
+    parts = data.split("_")
+    out = [parts[0]]
+    for part in parts[1:]:
+        if part.isdigit():
+            out.append("#")
+        elif len(part) >= 6 and (any(c.isdigit() for c in part) or (part.lower() != part and part.upper() != part)):
+            out.append("*")
+        elif len(part) > 24:
+            out.append("*")
+        else:
+            out.append(part)
+    return re.sub(r"(_\*)+", "_*", "_".join(out))
+
+
 class _Handler:
     def __init__(self, callback, filters, group):
         self.callback = callback
@@ -145,6 +191,11 @@ class Client:
         self._inline_results = {}   # token -> dict
         self._inline_msgs = {}      # pseudo inline_message_id -> (chat_id, message_id)
         self._seen_updates = []
+        # set by the bot: upload cap (admin-adjustable), caption signature,
+        # and the feature gate (admin panel on/off switches)
+        self.upload_limit = UPLOAD_LIMIT
+        self.caption_signature = ""
+        self.feature_gate = None
 
     # ------------------------------------------------------------ registration
     def _add(self, kind, func, filters, group):
@@ -262,13 +313,44 @@ class Client:
             d["callback_data"] = "_noop"
         return d
 
-    def _markup(self, rm):
+    def _gate_allows(self, key: str, uid=None) -> bool:
+        g = self.feature_gate
+        if g is None or not key:
+            return True
+        try:
+            if uid is not None and g.is_exempt(uid):
+                return True
+            return not g.is_disabled(key)
+        except Exception:
+            return True
+
+    def _markup(self, rm, chat_id=None):
         if rm is None:
             return None
         if isinstance(rm, dict):
             return rm
         if isinstance(rm, InlineKeyboardMarkup):
-            return {"inline_keyboard": [[self._button(b) for b in row] for row in rm.inline_keyboard]}
+            rows = []
+            g = self.feature_gate
+            for row in rm.inline_keyboard:
+                out = []
+                for b in row:
+                    d = self._button(b)
+                    data = getattr(b, "callback_data", None)
+                    if data is None and getattr(b, "switch_inline_query_current_chat", None) is not None:
+                        data = "_iq:" + str(b.switch_inline_query_current_chat)
+                    if data and g is not None:
+                        key = feature_key(str(data))
+                        try:
+                            g.seen(key, b.text)
+                        except Exception:
+                            pass
+                        if not self._gate_allows(key, chat_id):
+                            continue
+                    out.append(d)
+                if out:
+                    rows.append(out)
+            return {"inline_keyboard": rows}
         if isinstance(rm, ReplyKeyboardMarkup):
             d = {"keyboard": [[self._button(b) for b in row] for row in rm.keyboard]}
             if rm.resize_keyboard:
@@ -320,9 +402,8 @@ class Client:
             return None
         return s
 
-    @staticmethod
-    def _check_size(size, field):
-        limit = PHOTO_LIMIT if field == "photo" else UPLOAD_LIMIT
+    def _check_size(self, size, field):
+        limit = min(PHOTO_LIMIT, self.upload_limit) if field == "photo" else self.upload_limit
         if size and size > limit:
             raise errors.FileTooLarge(size, f"file is {size // (1024 * 1024)} MB; Bale allows {limit // (1024 * 1024)} MB",
                                       f"send_{field}")
@@ -417,23 +498,74 @@ class Client:
                     m = Message._parse(self, u["message"])
                     if await self._maybe_inline_text(m):
                         return
+                    if not await self._gate_message(m):
+                        return
                     await self._dispatch("message", m)
                 elif "callback_query" in u:
                     cq = CallbackQuery._parse(self, u["callback_query"])
                     if cq.data in self._long_cb:
                         cq.data = self._long_cb[cq.data]
-                    if await self._maybe_inline_callback(cq):
-                        return
                     if cq.data == "_noop":
                         return await cq.answer()
+                    uid = cq.from_user.id if cq.from_user else 0
+                    if not self._gate_allows(feature_key(cq.data or ""), uid):
+                        return await cq.answer("⛔️ این قابلیت فعلاً توسط مدیر غیرفعال شده است.", show_alert=True)
+                    if await self._maybe_inline_callback(cq):
+                        return
                     await self._dispatch("callback_query", cq)
                 elif "edited_message" in u:
                     await self._dispatch("edited_message", Message._parse(self, u["edited_message"]))
+                elif "channel_post" in u or "edited_channel_post" in u:
+                    # Never routed to message handlers: the bot must not answer
+                    # inside channels (e.g. the music cache channel).
+                    d = u.get("channel_post") or u.get("edited_channel_post")
+                    await self._channel_seen(Chat._parse(d.get("chat"), self))
                 elif "my_chat_member" in u or "chat_member" in u:
                     d = u.get("chat_member") or u.get("my_chat_member")
-                    await self._dispatch("chat_member_updated", ChatMemberUpdated._parse(self, d))
+                    upd = ChatMemberUpdated._parse(self, d)
+                    if upd.chat and upd.chat.type == ChatType.CHANNEL:
+                        await self._channel_seen(upd.chat)
+                    await self._dispatch("chat_member_updated", upd)
             except Exception:
                 print(f"update processing error:\n{traceback.format_exc()}", flush=True)
+
+    @staticmethod
+    def message_feature_key(m):
+        if m.text and m.text.startswith("/"):
+            return "cmd:/" + m.text[1:].split()[0].split("@")[0].lower() if m.text[1:].strip() else None
+        if m.text:
+            plat = link_platform(m.text)
+            return f"link:{plat}" if plat else None
+        kind = m.media
+        return f"upload:{kind}" if kind else None
+
+    async def _gate_message(self, m) -> bool:
+        if self.feature_gate is None or m is None:
+            return True
+        key = self.message_feature_key(m)
+        if not key:
+            return True
+        try:
+            self.feature_gate.seen(key, key)
+        except Exception:
+            pass
+        uid = m.from_user.id if m.from_user else (m.chat.id if m.chat else 0)
+        if self._gate_allows(key, uid):
+            return True
+        if m.chat and m.chat.type in (ChatType.PRIVATE, ChatType.BOT):
+            try:
+                await self.send_message(m.chat.id, "⛔️ این قابلیت فعلاً توسط مدیر غیرفعال شده است.")
+            except Exception:
+                pass
+        return False
+
+    async def _channel_seen(self, chat):
+        hook = getattr(self, "on_channel_seen", None)
+        if hook and chat is not None:
+            try:
+                await hook(chat)
+            except Exception:
+                print(f"channel hook failed:\n{traceback.format_exc()}", flush=True)
 
     async def _dispatch(self, kind: str, obj):
         groups = self._handlers.get(kind) or {}
@@ -467,7 +599,7 @@ class Client:
         for i, chunk in enumerate(chunks):
             res = await self.invoke("sendMessage", {
                 "chat_id": self._chat(chat_id), "text": chunk,
-                "reply_markup": self._markup(reply_markup) if i == len(chunks) - 1 else None,
+                "reply_markup": self._markup(reply_markup, chat_id) if i == len(chunks) - 1 else None,
                 "reply_to_message_id": reply_to_message_id if i == 0 else None})
             sent = self._msg(res)
         return sent
@@ -479,7 +611,7 @@ class Client:
         text = format_text(text, parse_mode)[:MAX_TEXT]
         try:
             res = await self.invoke("editMessageText", {"chat_id": self._chat(chat_id), "message_id": message_id,
-                                                        "text": text, "reply_markup": self._markup(reply_markup)})
+                                                        "text": text, "reply_markup": self._markup(reply_markup, chat_id)})
         except errors.MessageNotModified:
             return Message(message_id, Chat(chat_id), text=text, _client=self)
         except errors.BadRequest as e:
@@ -497,7 +629,7 @@ class Client:
         try:
             res = await self.invoke("editMessageCaption", {"chat_id": self._chat(chat_id), "message_id": message_id,
                                                            "caption": caption,
-                                                           "reply_markup": self._markup(reply_markup)})
+                                                           "reply_markup": self._markup(reply_markup, chat_id)})
         except errors.MessageNotModified:
             return Message(message_id, Chat(chat_id), caption=caption, _client=self)
         return self._msg(res) or Message(message_id, Chat(chat_id), caption=caption, _client=self)
@@ -508,7 +640,7 @@ class Client:
         try:
             res = await self.invoke("editMessageReplyMarkup", {
                 "chat_id": self._chat(chat_id), "message_id": message_id,
-                "reply_markup": self._markup(reply_markup) or {"inline_keyboard": []}})
+                "reply_markup": self._markup(reply_markup, chat_id) or {"inline_keyboard": []}})
         except errors.MessageNotModified:
             return None
         return self._msg(res)
@@ -544,9 +676,8 @@ class Client:
     async def copy_message(self, chat_id, from_chat_id, message_id: int, caption: str = None,
                            parse_mode=None, reply_markup=None, **kw):
         data = {"chat_id": self._chat(chat_id), "from_chat_id": self._chat(from_chat_id),
-                "message_id": message_id, "reply_markup": self._markup(reply_markup)}
-        if caption is not None:
-            data["caption"] = format_text(caption, parse_mode)[:MAX_CAPTION]
+                "message_id": message_id, "reply_markup": self._markup(reply_markup, chat_id)}
+        data["caption"] = format_text(self._signed(caption), parse_mode)[:MAX_CAPTION]
         try:
             res = await self.invoke("copyMessage", data)
             if isinstance(res, dict) and "chat" not in res:
@@ -572,24 +703,40 @@ class Client:
             return False
 
     # ------------------------------------------------------------ media
+    def _signed(self, caption):
+        """Every delivered file carries the bot's signature, so forwarded
+        media always shows where it came from."""
+        sig = self.caption_signature
+        caption = caption or ""
+        if not sig or sig in caption:
+            return caption
+        room = MAX_CAPTION - len(sig) - 2
+        return (caption[:room] + "\n\n" + sig) if caption.strip() else sig
+
     async def _send_file(self, method: str, field: str, chat_id, value, caption: str = "", parse_mode=None,
                          reply_markup=None, reply_to_message_id=None, file_name: str = None, thumb=None,
                          extra: dict = None):
         files = {}
-        data = {"chat_id": self._chat(chat_id), "reply_markup": self._markup(reply_markup),
+        data = {"chat_id": self._chat(chat_id), "reply_markup": self._markup(reply_markup, chat_id),
                 "reply_to_message_id": reply_to_message_id}
+        caption = self._signed(caption)
         if caption:
             data["caption"] = format_text(caption, parse_mode)[:MAX_CAPTION]
         data.update({k: v for k, v in (extra or {}).items() if v is not None})
         try:
             data[field] = self._file_arg(value, field, files, file_name)
             if thumb and isinstance(thumb, str) and os.path.isfile(thumb) and files:
+                # Bale follows the older Bot API, where the field is "thumb";
+                # send both names so either version picks the cover up.
                 self._file_arg(thumb, "thumbnail", files)
+                self._file_arg(thumb, "thumb", files)
             try:
                 res = await self.invoke(method, data, files or None)
             except errors.BadRequest as e:
-                if "thumbnail" in files:
-                    files.pop("thumbnail")[1].close()
+                if "thumbnail" in files or "thumb" in files:
+                    for k in ("thumbnail", "thumb"):
+                        if k in files:
+                            files.pop(k)[1].close()
                     res = await self.invoke(method, data, files or None)
                 elif field == "photo" and not files and "url" in e.description.lower():
                     raise
@@ -714,8 +861,9 @@ class Client:
                 val = self._file_arg(m.media, field, files)
                 item = {"type": m.TYPE if m.TYPE != "animation" else "video",
                         "media": f"attach://{field}" if val is None else val}
-                if m.caption:
-                    item["caption"] = format_text(m.caption, m.parse_mode)[:MAX_CAPTION]
+                cap = self._signed(m.caption) if i == 0 else m.caption
+                if cap:
+                    item["caption"] = format_text(cap, m.parse_mode)[:MAX_CAPTION]
                 items.append(item)
             res = await self.invoke("sendMediaGroup", {"chat_id": self._chat(chat_id), "media": items,
                                                        "reply_to_message_id": reply_to_message_id}, files or None)

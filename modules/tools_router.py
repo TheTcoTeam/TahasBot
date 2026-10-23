@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Tools router for TMulti Bot Revamp.
+Tools router for Taha Bot Bot Revamp.
 Handles user requests for Video, Music, and Image editing tools,
 as well as the /tool command dispatcher.
 """
@@ -30,11 +30,11 @@ async def handle_tool_command(client: Client, message: Message, user_data: dict,
 
     if not reply:
         text = (
-            "🎛 **جعبه ابزار TMulti**\n\n"
+            "🎛 **جعبه ابزار بات طاها**\n\n"
             "شما می‌توانید روی هر **ویدیو**، **آهنگ/وویس** یا **عکس/استیکر** ریپلای بزنید و دستور `/tool` را ارسال کنید تا ویرایشگر باز شود.\n\n"
             "یا یکی از بخش‌های زیر را انتخاب کنید:"
             if lang == "fa" else
-            "🎛 **TMulti Toolbox**\n\n"
+            "🎛 **Taha Bot Toolbox**\n\n"
             "Reply to any **video**, **audio/voice**, or **photo/sticker** with `/tool` to open the editor directly.\n\n"
             "Or select a tool category below:"
         )
@@ -143,8 +143,8 @@ async def handle_music_tool_callback(client: Client, query: CallbackQuery, user_
             await client.send_audio(
                 chat_id, audio=out_file,
                 title=f"{info.get('title','Track')} ({eff_label})",
-                performer=info.get('artist', 'TMulti Audio'), tag_source=src,
-                caption=f"🎧 **{eff_label}**\n⚡️ پردازش شده توسط @TMultiBot",
+                performer=info.get('artist', 'Taha Bot Audio'), tag_source=src,
+                caption=f"🎧 **{eff_label}**\n⚡️ پردازش شده توسط @tahasbot",
                 reply_markup=get_music_tools_keyboard(chat_id, get_lang_fn)
             )
             await status.delete()
@@ -173,8 +173,8 @@ async def handle_music_tool_callback(client: Client, query: CallbackQuery, user_
             await client.send_audio(
                 chat_id, audio=out_file,
                 title=f"{info.get('title','Track')} ({spd}x)",
-                performer=info.get('artist', 'TMulti Audio'), tag_source=src,
-                caption=f"⏩ **سرعت {spd}x**\n⚡️ پردازش شده توسط @TMultiBot",
+                performer=info.get('artist', 'Taha Bot Audio'), tag_source=src,
+                caption=f"⏩ **سرعت {spd}x**\n⚡️ پردازش شده توسط @tahasbot",
                 reply_markup=get_music_tools_keyboard(chat_id, get_lang_fn)
             )
             await status.delete()
@@ -223,7 +223,7 @@ async def handle_music_tool_callback(client: Client, query: CallbackQuery, user_
                 await client.send_audio(
                     chat_id, audio=out_file,
                     title=info.get('title','Track'),
-                    performer=info.get('artist', 'TMulti Audio'), tag_source=src,
+                    performer=info.get('artist', 'Taha Bot Audio'), tag_source=src,
                     caption=f"🎵 **فرمت {fmt.upper()}**",
                     reply_markup=get_music_tools_keyboard(chat_id, get_lang_fn)
                 )
@@ -244,6 +244,14 @@ async def handle_music_tool_callback(client: Client, query: CallbackQuery, user_
         )
 
 
+def _is_image_doc(doc) -> bool:
+    if doc is None:
+        return False
+    if (getattr(doc, "mime_type", "") or "").startswith("image/"):
+        return True
+    return os.path.splitext(getattr(doc, "file_name", "") or "")[1].lower() in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
+
+
 async def handle_image_tool_callback(client: Client, query: CallbackQuery, user_data: dict, user_states: dict, get_lang_fn=None):
     """Handles itool_* callbacks."""
     chat_id = query.message.chat.id
@@ -252,6 +260,20 @@ async def handle_image_tool_callback(client: Client, query: CallbackQuery, user_
     msg = query.message
 
     src = user_data.get(chat_id, {}).get("image_tools_path")
+    # "🎨 Image tools" under a downloaded photo (Pinterest/Pexels/Google...):
+    # work on THAT photo, not whatever was edited last.
+    attached = None
+    if data == "menu_image_tools" and query.message:
+        attached = query.message.photo or (query.message.document if _is_image_doc(query.message.document) else None)
+    if attached is not None and getattr(attached, "file_id", None):
+        try:
+            os.makedirs("media_downloads", exist_ok=True)
+            src = await client.download_media(attached.file_id,
+                                              file_name=f"media_downloads/src_{chat_id}_{int(time.time())}.png")
+            user_data.setdefault(chat_id, {})["image_tools_path"] = src
+            user_data[chat_id]["last_image_file_id"] = attached.file_id
+        except Exception:
+            src = None
     if not src or not os.path.exists(src):
         # Try downloading last_image_file_id
         file_id = user_data.get(chat_id, {}).get("last_image_file_id")
@@ -277,6 +299,15 @@ async def handle_image_tool_callback(client: Client, query: CallbackQuery, user_
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu_main")]])
         )
 
+    # 0. The tools menu itself (from a photo's button or a "back" button)
+    if data == "menu_image_tools":
+        text = "🎨 **تصویر آماده است. ابزار مورد نظر را انتخاب کنید:**"
+        kb = get_image_tools_keyboard(chat_id, get_lang_fn)
+        if attached is not None or msg.photo or msg.document:
+            # keep the photo's own caption/buttons; open the tools as a new message
+            return await client.send_message(chat_id, text, reply_markup=kb)
+        return await msg.edit_text(text, reply_markup=kb)
+
     # 1. Remove Background
     if data == "itool_rembg":
         status = await client.send_message(chat_id, "🪄 در حال حذف پس‌زمینه و شفاف‌سازی...")
@@ -284,7 +315,7 @@ async def handle_image_tool_callback(client: Client, query: CallbackQuery, user_
             out_file = await asyncio.to_thread(itools.remove_image_background, src)
             await client.send_document(
                 chat_id, document=out_file,
-                caption="🪄 **پس‌زمینه با موفقیت حذف شد (PNG شفاف)**\n⚡️ پردازش شده توسط @TMultiBot",
+                caption="🪄 **پس‌زمینه با موفقیت حذف شد (PNG شفاف)**\n⚡️ پردازش شده توسط @tahasbot",
                 reply_markup=get_image_tools_keyboard(chat_id, get_lang_fn)
             )
             await status.delete()

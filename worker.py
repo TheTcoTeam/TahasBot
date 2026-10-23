@@ -121,12 +121,14 @@ def send_text_to_telegram(text):
 
 async def upload_music(audio_path, thumb_path, chat_id, msg_id, cache_channel=None, vid_id=""):
     app = Client("music_worker", api_id=2040, api_hash="b18441a1ff607e10a989891a5462e627", bot_token=BOT_TOKEN, in_memory=True, max_concurrent_transmissions=8, sleep_threshold=180)
+    app.upload_limit = UPLOAD_LIMIT_MB * 1024 * 1024
+    app.caption_signature = SIGNATURE
     await app.start()
     try:
         # Group vs Private Chat keyboard
         kb = None
         if int(chat_id) < 0:
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("⚡️ رفتن به تی‌مولتی", url=f"https://ble.ir/{BOT_USERNAME}?start=opt_{vid_id}")]])
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("⚡️ رفتن به بات طاها", url=f"https://ble.ir/{BOT_USERNAME}?start=opt_{vid_id}")]])
         elif vid_id:
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🎤 متن ترانه", callback_data=f"lyrics_{vid_id}"),
@@ -201,6 +203,8 @@ async def upload_progress(current, total, app, active_msg_id, last_update_ref, p
 
 async def upload_massive_file(file_paths, active_msg_id, video_meta=None, thumb_path=None):
     app = Client("upload_worker", api_id=2040, api_hash="b18441a1ff607e10a989891a5462e627", bot_token=BOT_TOKEN, in_memory=True, max_concurrent_transmissions=8, sleep_threshold=180)
+    app.upload_limit = UPLOAD_LIMIT_MB * 1024 * 1024
+    app.caption_signature = SIGNATURE
     await app.start()
     try:
         total_files = len(file_paths)
@@ -219,7 +223,7 @@ async def upload_massive_file(file_paths, active_msg_id, video_meta=None, thumb_
             last_update = [time.time()]
             if ext in ['.mp3', '.m4a', '.flac', '.wav', '.ogg']: 
                 if CHAT_ID < 0:
-                    audio_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⚡️ رفتن به تی‌مولتی", url=f"https://ble.ir/{BOT_USERNAME}")]])
+                    audio_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⚡️ رفتن به بات طاها", url=f"https://ble.ir/{BOT_USERNAME}")]])
                 else:
                     audio_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎛 ابزارهای صدا و افکت", callback_data="menu_music_tools")]])
                 am = _audio_meta_from_info(glob.glob("TCO_DL_*.info.json"))
@@ -254,7 +258,9 @@ async def upload_massive_file(file_paths, active_msg_id, video_meta=None, thumb_
         await app.stop()
 
 # Bale rejects bot uploads over 50 MB, so bigger files go out as several parts.
-BALE_PART_BYTES = int(os.environ.get('BALE_PART_BYTES', str(47 * 1024 * 1024)))
+UPLOAD_LIMIT_MB = int(os.environ.get('UPLOAD_LIMIT_MB') or 50)
+SIGNATURE = os.environ.get('SIGNATURE', '')
+BALE_PART_BYTES = int(os.environ.get('BALE_PART_BYTES') or max(4, UPLOAD_LIMIT_MB - 3) * 1024 * 1024)
 
 
 def _probe_seconds(path):

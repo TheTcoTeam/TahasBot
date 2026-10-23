@@ -17,6 +17,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import re
+import html
 import json
 import base64
 import logging
@@ -190,7 +191,9 @@ def selftest():
     allowed = {"download_instagram_native_sync", "download_tiktok_native_sync", "download_source_audio_sync",
                "spotify_search_tracks_sync", "ytm_search_sync", "sc_search_sync", "pinterest_pin_media_sync",
                "pinterest_search_sync", "reddit_resolve_post_sync", "reddit_search_sync", "twitter_fetch_sync",
-               "pexels_search_sync", "lrclib_lookup", "enrich_meta_sync", "resolve_youtube_id_sync"}
+               "pexels_search_sync", "lrclib_lookup", "enrich_meta_sync", "resolve_youtube_id_sync",
+               "selftest_music_timing", "download_url_to_file_sync", "instagram_embed_sync", "download_generic_sync",
+               "wikimedia_search_sync", "fetch_full_image_sync"}
     if fn_name not in allowed:
         return jsonify({"error": "fn not allowed", "allowed": sorted(allowed)}), 400
     args = json.loads(request.args.get("args", "[]"))
@@ -585,6 +588,16 @@ async def send_cached_doc(client: Client, chat_id: int, doc: dict, reply_markup=
     if not doc:
         return False
     fid = doc_file_id(doc)
+    msg_id = doc.get("cache_msg_id")
+    # Bale drops the cover when a file is re-sent by file_id ("thumbnails
+    # cannot be reused"), but a copy of the archived message keeps it.
+    if msg_id and MUSIC_CACHE_CHANNEL:
+        try:
+            await client.copy_message(chat_id, int(str(MUSIC_CACHE_CHANNEL).strip()), int(msg_id),
+                                      caption=caption, reply_markup=reply_markup)
+            return True
+        except Exception as e:
+            print(f"archive copy failed for {doc.get('vid_id')}: {e}; trying file_id", flush=True)
     if fid:
         try:
             await client.send_audio(chat_id, audio=fid, caption=caption, reply_markup=reply_markup)
@@ -592,7 +605,6 @@ async def send_cached_doc(client: Client, chat_id: int, doc: dict, reply_markup=
         except Exception as e:
             print(f"cached file_id failed ({e}); trying archive channel", flush=True)
             LOCAL_CACHE.pop(doc.get("vid_id"), None)
-    msg_id = doc.get("cache_msg_id")
     if msg_id and MUSIC_CACHE_CHANNEL:
         try:
             sent = await client.copy_message(chat_id, int(str(MUSIC_CACHE_CHANNEL).strip()), int(msg_id),
@@ -1429,10 +1441,19 @@ async def render_sc_search(msg: Message, query: str, chat_id: int):
         store = user_data.setdefault(chat_id, {})
         store["sc_all"] = data
         store["last_music_query"] = query
-        # scvid_<index> indexes this list, so keep them aligned.
         store["mus_results"] = [(str(item.get('id') or item.get('url')), item.get('webpage_url') or item.get('url'))
                                 for item in data]
-        await render_sc_page(msg, chat_id, page=0)
+        items = []
+        for i, e in enumerate(data):
+            m = meta_from_sc(e)
+            views = int(e.get("view_count") or 0)
+            items.append({"id": m["sc_id"], "title": m["title"] or "Unknown Title",
+                          "artist": m["artist"] or "Unknown Artist", "album": "",
+                          "duration": m["duration"], "dur_str": fmt_dur(m["duration"]),
+                          "views_str": format_number(views) if views else "", "views": views,
+                          "cover": m["cover"], "score": 1000 - i, "meta": m})
+        store["official_all"] = items
+        await render_official_page(msg, chat_id, page=0)
     except Exception as e:
         print(f"SC Search Error: {e}", flush=True)
         await msg.edit_text(t(chat_id, "sc_search_error"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(chat_id, "btn_back"), callback_data="menu_music")]]))
@@ -1453,7 +1474,7 @@ async def render_ytm_search(msg: Message, query: str, chat_id: int):
             items.append({"id": m["yt_id"], "title": m["title"] or "Unknown Title",
                           "artist": m["artist"] or "Unknown Artist", "album": m["album"],
                           "duration": m["duration"], "dur_str": fmt_dur(m["duration"]),
-                          "views_str": "", "views": 0, "cover": m["cover"], "score": 1000 - i})
+                          "views_str": "", "views": 0, "cover": m["cover"], "score": 1000 - i, "meta": m})
         store["official_all"] = items
         store["last_music_query"] = query
         await render_official_page(msg, chat_id, page=0)
@@ -2125,6 +2146,15 @@ STRINGS.update({
     "official_downloaded_caption": {"fa": "🎵 دانلود شده از نسخه اورجینال", "en": "🎵 Downloaded from the original version", "ru": "🎵 Загружено из оригинальной версии", "es": "🎵 Descargado de la versión original"},
 })
 
+def _official_item_meta(item: dict) -> dict:
+    """Meta for a row of the shared results view (YouTube Music, SoundCloud,
+    smart YouTube search), so every pick goes through deliver_track."""
+    if item.get("meta"):
+        return dict(item["meta"])
+    return make_meta("yt", yt_id=item.get("id"), title=item.get("title"), artist=item.get("artist"),
+                     album=item.get("album"), duration=item.get("duration"), cover=item.get("cover"))
+
+
 async def render_official_page(msg: Message, chat_id: int, page: int = 0, sort: str = "r"):
     """Paginated + sortable results view.
 
@@ -2248,13 +2278,13 @@ def track_actions_kb(cache_key: str, chat_id=None) -> InlineKeyboardMarkup:
 
 
 def get_track_delivery_kb(cache_key: str, chat_id=None) -> InlineKeyboardMarkup:
-    """If delivered in a group/channel (chat_id < 0), return only the 'Go to TMulti' button.
+    """If delivered in a group/channel (chat_id < 0), return only the 'Go to Taha Bot' button.
     If in private chat (chat_id > 0), return the full superpower action keyboard."""
     if chat_id and int(chat_id) < 0:
         bot_uname = os.environ.get("BOT_USERNAME", "tahasbot")
         tok = lyrics_token(str(cache_key))
         return InlineKeyboardMarkup([[
-            InlineKeyboardButton("⚡️ رفتن به تی‌مولتی", url=f"https://ble.ir/{bot_uname}?start=opt_{tok}")
+            InlineKeyboardButton("⚡️ رفتن به بات طاها", url=f"https://ble.ir/{bot_uname}?start=opt_{tok}")
         ]])
     return track_actions_kb(str(cache_key), chat_id)
 
@@ -3366,6 +3396,24 @@ def finalize_track_sync(raw_path: str, meta: dict):
     return mp3, thumb, probe_duration(mp3) or int(meta.get("duration") or 0)
 
 
+def selftest_music_timing(yt_id: str = "JGwWNGJdvx8") -> dict:
+    """Stage timings of the song pipeline on this host (for /_selftest)."""
+    meta = make_meta("yt", yt_id=yt_id)
+    out = {}
+    t0 = time.time()
+    raw, _ = download_source_audio_sync(meta)
+    out["download"] = round(time.time() - t0, 1)
+    t1 = time.time()
+    mp3 = to_mp3(raw, f"music_downloads/timing_{int(t1)}.mp3", "320k") if not raw.endswith(".mp3") else raw
+    out["mp3_320k_encode"] = round(time.time() - t1, 1)
+    for p in (raw, mp3):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    return out
+
+
 def track_cache_key(meta: dict) -> str:
     if meta.get("yt_id"):
         return meta["yt_id"]
@@ -3624,36 +3672,132 @@ def fmt_dur(sec) -> str:
 
 
 # ---------------- 5. INSTAGRAM & TIKTOK NATIVE RENDER ENGINES ----------------
+_IG_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
+
+
+def _ig_unescape(text: str) -> str:
+    for _ in range(3):
+        text = (text.replace('\\"', '"').replace("\\/", "/").replace("\\u0026", "&")
+                .replace("\\\\", "\\"))
+    return text
+
+
+def instagram_embed_sync(url: str) -> dict:
+    """Logged-out fallback: Instagram's public embed page carries the media
+    URLs of a post/reel and is served to datacenter IPs that the API blocks."""
+    m = re.search(r"instagram\.com/(?:[\w.]+/)?(?:p|reel|reels|tv)/([\w-]+)", url)
+    if not m:
+        raise RuntimeError("not a post/reel link")
+    sc = m.group(1)
+    r = requests.get(f"https://www.instagram.com/p/{sc}/embed/captioned/",
+                     headers={"User-Agent": _IG_UA, "Accept-Language": "en-US,en;q=0.9"}, timeout=25)
+    r.raise_for_status()
+    h = _ig_unescape(r.text)
+    videos = list(dict.fromkeys(v for v in re.findall(r'"video_url":"(https?://[^"]+)"', h)))
+    images = list(dict.fromkeys(v for v in re.findall(r'"display_url":"(https?://[^"]+)"', h)))
+    if not images:
+        images = [html.unescape(x) for x in re.findall(r'class="EmbeddedMediaImage"[^>]*src="([^"]+)"', r.text)]
+    caption = ""
+    cm = re.search(r'"edge_media_to_caption":\{"edges":\[\{"node":\{"text":"(.*?)"\}', h)
+    if cm:
+        try:
+            caption = json.loads('"' + cm.group(1) + '"')
+        except Exception:
+            caption = cm.group(1)
+    os.makedirs("media_downloads", exist_ok=True)
+    stamp = f"{int(time.time() * 1000)}_{random.randint(100, 999)}"
+    files = []
+    # a carousel lists one display_url per child plus the cover; videos win
+    picks = [(u, ".mp4") for u in videos] or [(u, ".jpg") for u in images[:10]]
+    for i, (u, ext) in enumerate(picks[:10]):
+        path = f"media_downloads/ig_{sc}_{stamp}_{i}{ext}"
+        try:
+            download_url_to_file_sync(u, path)
+            files.append(path)
+        except Exception as e:
+            print(f"instagram embed media fetch failed: {e}", flush=True)
+    return {"files": files, "caption": caption[:3900]}
+
+
 def download_instagram_native_sync(url: str):
-    """Downloads Instagram media directly on Render without touching GitHub Actions."""
+    """Instagram on Render, no cookies needed: yt-dlp first (fast, works for
+    most public posts), then the public embed page. Cookies are only a last
+    resort if an IG_COOKIES value happens to be configured."""
     clean_url = url.split("?")[0]
-    opts = {
+    base = {
         'format': 'best',
         'outtmpl': 'media_downloads/ig_%(id)s.%(ext)s',
         'quiet': True,
         'no_warnings': True,
         'http_chunk_size': 10485760,
-        # Lets extraction succeed for photo posts instead of aborting with
-        # "There is no video in this post".
         'ignore_no_formats_error': True,
-        # This path had NO retries: a single dropped handshake killed the whole
-        # request, which is fatal where egress is intermittent.
+        'impersonate': ImpersonateTarget.from_str('chrome'),
+        'retries': 3, 'extractor_retries': 1, 'socket_timeout': 20,
+    }
+    last = None
+    try:
+        info = extract_post_info(base, clean_url, "instagram")
+        files = assemble_post_media(info, "media_downloads/ig_")
+        if files:
+            caption = info.get('description') or info.get('title') or ""
+            return {'files': files, 'caption': caption[:3900]}
+    except Exception as e:
+        last = e
+        print(f"instagram yt-dlp (no cookies) failed: {str(e)[:120]}", flush=True)
+    try:
+        data = instagram_embed_sync(clean_url)
+        if data["files"]:
+            return data
+    except Exception as e:
+        last = e
+        print(f"instagram embed failed: {str(e)[:120]}", flush=True)
+    if os.path.exists(INSTAGRAM_COOKIES_FILE) and os.path.getsize(INSTAGRAM_COOKIES_FILE) > 0:
+        info = extract_post_info({**base, 'cookiefile': INSTAGRAM_COOKIES_FILE}, clean_url, "instagram")
+        files = assemble_post_media(info, "media_downloads/ig_")
+        return {'files': files, 'caption': (info.get('description') or info.get('title') or "")[:3900]}
+    if last:
+        raise last
+    return {'files': [], 'caption': ""}
+
+
+def download_generic_sync(url: str):
+    """Any other site yt-dlp supports (Facebook, Vimeo, Twitch clips, ...)."""
+    limit = int(getattr(bot, "upload_limit", 50 * 1024 * 1024))
+    opts = {
+        'format': f'best[filesize<{limit}]/best[filesize_approx<{limit}]/best[height<=720]/best',
+        'outtmpl': 'media_downloads/gen_%(id)s.%(ext)s',
+        'quiet': True, 'no_warnings': True, 'noplaylist': True,
+        'impersonate': ImpersonateTarget.from_str('chrome'),
+        'ignore_no_formats_error': True,
         **NET_RETRY_OPTS,
     }
-    if os.path.exists(INSTAGRAM_COOKIES_FILE) and os.path.getsize(INSTAGRAM_COOKIES_FILE) > 0:
-        opts['cookiefile'] = INSTAGRAM_COOKIES_FILE
+    info = extract_post_info(opts, url, "generic")
+    files = assemble_post_media(info, "media_downloads/gen_")
+    caption = info.get('title') or ""
+    return {'files': files, 'caption': caption[:3900]}
 
-    info = extract_post_info(opts, clean_url, "instagram")
 
-    media_files = assemble_post_media(info, "media_downloads/ig_")
-    # Empty (not a placeholder) when there's no description, so no pointless
-    # text message gets sent. 3900 fits a standalone message's 4096 limit —
-    # the old 950 was sized for a media caption, which no longer applies.
-    caption = info.get('description') or info.get('title') or ""
-    if len(caption) > 3900:
-        caption = caption[:3900] + "..."
+async def process_generic_link(client: Client, chat_id: int, msg: Message, url: str):
+    try:
+        await msg.edit_text("⏳ در حال بررسی و دانلود لینک...")
+        data = await asyncio.to_thread(download_generic_sync, url)
+        files = data.get("files") or []
+        if not files:
+            return await msg.edit_text("❌ از این لینک فایلی قابل دانلود پیدا نشد.")
+        await msg.delete()
+        await send_post_media(client, chat_id, files, data.get("caption") or "", "🌐 ")
+        log_activity(chat_id, "download", url)
+        for f in files:
+            if os.path.exists(f):
+                os.remove(f)
+    except Exception as e:
+        print(f"generic link failed: {str(e)[:200]}", flush=True)
+        try:
+            await msg.edit_text("❌ این لینک پشتیبانی نمی‌شود یا دانلود آن ممکن نبود.")
+        except Exception:
+            pass
 
-    return {'files': media_files, 'caption': caption}
 
 STRINGS.update({
     "ig_fetching_media": {"fa": "⏳ **در حال دریافت مدیا از اینستاگرام...**", "en": "⏳ **Fetching media from Instagram...**", "ru": "⏳ **Получение медиа из Instagram...**", "es": "⏳ **Obteniendo contenido de Instagram...**"},
@@ -4756,7 +4900,7 @@ STRINGS.update({
 # search with full-resolution originals and no key required.
 GOOGLE_CSE_KEY = os.environ.get("GOOGLE_CSE_KEY", "").strip()
 GOOGLE_CSE_CX = os.environ.get("GOOGLE_CSE_CX", "").strip()
-_WIKI_UA = {"User-Agent": "TMultiBot/1.0 (Telegram bot; image search)"}
+_WIKI_UA = {"User-Agent": "TahasBot/1.0 (Bale messenger bot; image search; https://ble.ir/tahasbot)"}
 
 
 def google_cse_search_sync(query: str, page: int = 1, per_page: int = 8):
@@ -4791,6 +4935,43 @@ def wikimedia_search_sync(query: str, page: int = 1, per_page: int = 8):
                     "src": {"medium": ii.get("thumburl") or ii["url"], "large": ii.get("thumburl") or ii["url"],
                             "original": ii["url"]}})
     return out
+
+
+def fetch_full_image_sync(photo: dict) -> str:
+    """Best available original that Bale will accept: the real original when
+    it is a normal image under the upload cap, else the large rendition.
+    Wikimedia refuses generic browser user agents, and many Google hits
+    block hotlinking, hence the fallbacks."""
+    limit = int(getattr(bot, "upload_limit", 50 * 1024 * 1024))
+    os.makedirs(IMAGE_DL_DIR, exist_ok=True)
+    src = photo.get("src") or {}
+    last = None
+    for url in [src.get("original"), src.get("large"), src.get("medium")]:
+        if not url:
+            continue
+        ua = _WIKI_UA if "wikimedia.org" in url else {"User-Agent": PINTEREST_UA}
+        try:
+            r = requests.get(url, headers=ua, timeout=60, stream=True)
+            r.raise_for_status()
+            ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype and not ctype.startswith("image/"):
+                raise RuntimeError(f"not an image ({ctype})")
+            ext = {"image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}.get(ctype, ".jpg")
+            if ctype in ("image/tiff", "image/svg+xml"):
+                raise RuntimeError(f"unsupported format {ctype}")
+            path = os.path.join(IMAGE_DL_DIR, f"img_{hashlib.md5(url.encode()).hexdigest()[:10]}{ext}")
+            size = 0
+            with open(path, "wb") as fh:
+                for chunk in r.iter_content(1 << 16):
+                    size += len(chunk)
+                    if size > limit:
+                        raise RuntimeError("larger than the upload limit")
+                    fh.write(chunk)
+            return path
+        except Exception as e:
+            last = e
+            print(f"full image fetch failed for {url[:80]}: {e}", flush=True)
+    raise RuntimeError(f"no downloadable rendition: {last}")
 
 
 def image_provider_search_sync(provider: str, query: str, page: int, per_page: int = 8):
@@ -4832,8 +5013,14 @@ async def render_image_search(msg: Message, query: str, chat_id: int, page: int 
             pass
 
         sent_any = False
+        by_id = store.setdefault("img_by_id", {})
+        if len(by_id) > 400:
+            by_id.clear()
         for i, photo in enumerate(results):
-            rows = [[InlineKeyboardButton(t(chat_id, "img_btn_full_quality"), callback_data=f"img_pick_{i}")]]
+            # Keyed by photo id, so buttons from earlier pages/searches still work.
+            pid = hashlib.md5(f"{provider}:{photo['id']}".encode()).hexdigest()[:12]
+            by_id[pid] = dict(photo, _provider=provider)
+            rows = [[InlineKeyboardButton(t(chat_id, "img_btn_full_quality"), callback_data=f"img_pick_{pid}")]]
             try:
                 await client.send_photo(chat_id, photo=photo["src"]["medium"],
                                         caption=f"📸 {photo['photographer']}",
@@ -5086,6 +5273,9 @@ def _dispatch_workflow(workflow: str, payload: dict) -> bool:
     url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/{workflow}/dispatches"
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
     inputs = {k: str(v) for k, v in payload.items() if v is not None}
+    # admin-panel values the runners must honour too
+    inputs.setdefault("UPLOAD_LIMIT_MB", str(upload_limit_mb()))
+    inputs.setdefault("SIGNATURE", getattr(bot, "caption_signature", "") or "")
     try:
         r = requests.post(url, headers=headers, json={"ref": GITHUB_REF, "inputs": inputs}, timeout=15)
         if r.status_code != 204:
@@ -5149,10 +5339,10 @@ user_data = {}
 # visually. One idea per line, Persian commas, emoji as line markers.
 STRINGS.update({
     "main_menu_text": {
-        "fa": "👋 سلام **{name}** عزیز! به ربات همه‌کاره **TMulti** خوش آمدید.\n\n⚡️ شما می‌توانید هر لینکی (اینستاگرام، تیک‌تاک، یوتیوب، اسپاتیفای، ساندکلاد، ردیت، پینترست و...) را مستقیماً ارسال کنید تا بلافاصله دانلود شود.\n\n🎛 یا از منوی زیر بخش مورد نظر را انتخاب کنید:",
-        "en": "✨ **TMulti**\nYour all-in-one download and music bot\n\n🎬  YouTube, Instagram, TikTok\n🎵  Original music and SoundCloud\n🎛  Audio effects, lyrics, full albums\n\n👇  Pick a section below",
-        "ru": "✨ **TMulti**\nБот для скачивания и музыки на все случаи\n\n🎬  YouTube, Instagram, TikTok\n🎵  Оригинальная музыка и SoundCloud\n🎛  Аудиоэффекты, текст песни, целые альбомы\n\n👇  Выберите раздел ниже",
-        "es": "✨ **TMulti**\nTu bot todo-en-uno de descargas y música\n\n🎬  YouTube, Instagram, TikTok\n🎵  Música original y SoundCloud\n🎛  Efectos de audio, letras, álbumes completos\n\n👇  Elige una sección abajo",
+        "fa": "👋 سلام **{name}** عزیز! به ربات همه‌کاره **بات طاها** خوش آمدید.\n\n⚡️ شما می‌توانید هر لینکی (اینستاگرام، تیک‌تاک، یوتیوب، اسپاتیفای، ساندکلاد، ردیت، پینترست و...) را مستقیماً ارسال کنید تا بلافاصله دانلود شود.\n\n🎛 یا از منوی زیر بخش مورد نظر را انتخاب کنید:",
+        "en": "✨ **Taha Bot**\nYour all-in-one download and music bot\n\n🎬  YouTube, Instagram, TikTok\n🎵  Original music and SoundCloud\n🎛  Audio effects, lyrics, full albums\n\n👇  Pick a section below",
+        "ru": "✨ **Taha Bot**\nБот для скачивания и музыки на все случаи\n\n🎬  YouTube, Instagram, TikTok\n🎵  Оригинальная музыка и SoundCloud\n🎛  Аудиоэффекты, текст песни, целые альбомы\n\n👇  Выберите раздел ниже",
+        "es": "✨ **Taha Bot**\nTu bot todo-en-uno de descargas y música\n\n🎬  YouTube, Instagram, TikTok\n🎵  Música original y SoundCloud\n🎛  Efectos de audio, letras, álbumes completos\n\n👇  Elige una sección abajo",
     },
     "btn_downloader": {"fa": "📥 دانلودر چندرسانه‌ای", "en": "📥 Media Downloader", "ru": "📥 Загрузчик медиа", "es": "📥 Descargador de medios"},
     "btn_music": {"fa": "🎵 موزیک", "en": "🎵 Music", "ru": "🎵 Музыка", "es": "🎵 Música"},
@@ -5390,10 +5580,10 @@ HELP_PAGES["profile"] = {
     },
 }
 HELP_PAGES["inline"]["body"] = {
-    "fa": "⚡️ **استفاده در هر چتی**\n\nدر هر چت تایپ کنید:\n`@{bot_username} sp نام آهنگ` (اسپاتیفای) • `ytm` (یوتیوب موزیک) • `sc` (ساندکلاد)\n`alb` آلبوم • `art` خواننده • `pl` پلی‌لیست • `top` چارت هفته • `vid` ویدیو • `pt` پینترست • `px` پکسلز • `ai` سوال\n\nآهنگ‌های آماده فوری ارسال می‌شوند؛ بقیه اول «⏳ در حال دانلود» را نشان می‌دهند و بعد با آهنگ کامل جایگزین می‌شوند. دکمه «⚡️ رفتن به تی‌مولتی» زیر آهنگ، همه ابزارهای آن را در ربات باز می‌کند.",
-    "en": "⚡️ **Use It In Any Chat**\n\nIn any chat type:\n`@{bot_username} sp song` (Spotify) • `ytm` (YouTube Music) • `sc` (SoundCloud)\n`alb` album • `art` artist • `pl` playlist • `top` weekly chart • `vid` video • `pt` Pinterest • `px` Pexels • `ai` question\n\nReady songs are sent instantly; others first show \"⏳ downloading\" and are then replaced by the full song. The \"⚡️ Go to TMulti\" button under a song opens all its tools in the bot.",
-    "ru": "⚡️ **В любом чате**\n\nНаберите в любом чате:\n`@{bot_username} sp песня` (Spotify) • `ytm` (YouTube Music) • `sc` (SoundCloud)\n`alb` альбом • `art` артист • `pl` плейлист • `top` чарт • `vid` видео • `pt` Pinterest • `px` Pexels • `ai` вопрос\n\nГотовые песни приходят мгновенно; остальные сначала показывают «⏳ загрузка», затем заменяются полной песней. Кнопка «⚡️ Перейти в TMulti» открывает все инструменты песни в боте.",
-    "es": "⚡️ **Úsalo en cualquier chat**\n\nEn cualquier chat escribe:\n`@{bot_username} sp canción` (Spotify) • `ytm` (YouTube Music) • `sc` (SoundCloud)\n`alb` álbum • `art` artista • `pl` lista • `top` top semanal • `vid` video • `pt` Pinterest • `px` Pexels • `ai` pregunta\n\nLas canciones listas se envían al instante; las demás muestran «⏳ descargando» y luego se reemplazan por la canción completa. El botón «⚡️ Ir a TMulti» abre todas sus herramientas en el bot.",
+    "fa": "⚡️ **استفاده در هر چتی**\n\nدر هر چت تایپ کنید:\n`@{bot_username} sp نام آهنگ` (اسپاتیفای) • `ytm` (یوتیوب موزیک) • `sc` (ساندکلاد)\n`alb` آلبوم • `art` خواننده • `pl` پلی‌لیست • `top` چارت هفته • `vid` ویدیو • `pt` پینترست • `px` پکسلز • `ai` سوال\n\nآهنگ‌های آماده فوری ارسال می‌شوند؛ بقیه اول «⏳ در حال دانلود» را نشان می‌دهند و بعد با آهنگ کامل جایگزین می‌شوند. دکمه «⚡️ رفتن به بات طاها» زیر آهنگ، همه ابزارهای آن را در ربات باز می‌کند.",
+    "en": "⚡️ **Use It In Any Chat**\n\nIn any chat type:\n`@{bot_username} sp song` (Spotify) • `ytm` (YouTube Music) • `sc` (SoundCloud)\n`alb` album • `art` artist • `pl` playlist • `top` weekly chart • `vid` video • `pt` Pinterest • `px` Pexels • `ai` question\n\nReady songs are sent instantly; others first show \"⏳ downloading\" and are then replaced by the full song. The \"⚡️ Go to Taha Bot\" button under a song opens all its tools in the bot.",
+    "ru": "⚡️ **В любом чате**\n\nНаберите в любом чате:\n`@{bot_username} sp песня` (Spotify) • `ytm` (YouTube Music) • `sc` (SoundCloud)\n`alb` альбом • `art` артист • `pl` плейлист • `top` чарт • `vid` видео • `pt` Pinterest • `px` Pexels • `ai` вопрос\n\nГотовые песни приходят мгновенно; остальные сначала показывают «⏳ загрузка», затем заменяются полной песней. Кнопка «⚡️ Перейти в Taha Bot» открывает все инструменты песни в боте.",
+    "es": "⚡️ **Úsalo en cualquier chat**\n\nEn cualquier chat escribe:\n`@{bot_username} sp canción` (Spotify) • `ytm` (YouTube Music) • `sc` (SoundCloud)\n`alb` álbum • `art` artista • `pl` lista • `top` top semanal • `vid` video • `pt` Pinterest • `px` Pexels • `ai` pregunta\n\nLas canciones listas se envían al instante; las demás muestran «⏳ descargando» y luego se reemplazan por la canción completa. El botón «⚡️ Ir a Taha Bot» abre todas sus herramientas en el bot.",
 }
 for _l, _line in {
     "fa": ("🔴 **ردیت** — پست، ساب‌ردیت و جستجو", "🐦 **ردیت و X** — پست، ساب‌ردیت، جستجو و توییت‌ها"),
@@ -5424,6 +5614,17 @@ for _l, _extra in {
     "es": "\n\n⚡️ El reconocimiento usa Shazam y, tras el resultado, el botón «🎛 Editar este archivo» abre las herramientas de audio.",
 }.items():
     HELP_PAGES["shazam"]["body"][_l] = HELP_PAGES["shazam"]["body"][_l] + _extra
+
+# Bale build: the help was rewritten for what this bot actually does on Bale
+# (no inline mode, upload limits, admin approval...). ru/es fall back to English.
+from modules import bale_help as _bale_help
+HELP_PAGES.clear()
+for _k, _page in _bale_help.PAGES.items():
+    for _part in ("label", "body"):
+        for _l in ("ru", "es"):
+            _page[_part].setdefault(_l, _page[_part]["en"])
+    HELP_PAGES[_k] = _page
+STRINGS["help_home_text"] = {**_bale_help.HOME, "ru": _bale_help.HOME["en"], "es": _bale_help.HOME["en"]}
 
 
 def help_keyboard(chat_id, active=None):
@@ -5485,10 +5686,10 @@ STRINGS.update({
         "es": "🎧 **Búsqueda en Spotify:**\nEnvía el nombre de la canción o artista:",
     },
     "ai_intro_text": {
-        "fa": "🧠✨ **دستیار هوشمند TMulti**\n_دستیار شخصی شما برای موزیک، ویدیو و بیشتر_\n\nبا من مثل یک دوست حرف بزن — نه دستور! چیزی که میتونم برات انجام بدم:\n\n🎵 **کشف و دانلود موزیک**\nبگو چه حسی داری یا چیکار میخوای بکنی («آهنگ برای باشگاه»، «آهنگ‌های غمگین») و چند تا پیشنهاد عالی می‌گیری — با یک کلیک همه رو دانلود کن.\n\n📺 **جستجوی یوتیوب**\nاسم ویدیو یا موضوعش رو بگو، نتایج واقعی رو نشونت میدم تا انتخاب کنی.\n\n🎤 **متن آهنگ**\nاسم و خواننده آهنگ رو بگو، متن کاملشو برات میارم.\n\n📊 **سابقه دانلودها**\nبپرس چی دانلود کردی و کِی — از دیتابیس خودت برات میگم.\n\n_فقط بنویس چی میخوای، بقیه‌شو من انجام میدم._ 🚀",
-        "en": "🧠✨ **TMulti AI Assistant**\n_Your personal assistant for music, video and more_\n\nTalk to me like a friend, not a command! Here's what I can do for you:\n\n🎵 **Discover & download music**\nTell me your mood or what you're up to (\"a song for the gym\", \"sad songs\") and get great suggestions — download them all with one tap.\n\n📺 **YouTube search**\nName a video or its topic, and I'll show you real results to pick from.\n\n🎤 **Lyrics**\nName the song and artist, and I'll bring you the full lyrics.\n\n📊 **Download history**\nAsk what you downloaded and when — I'll pull it from your own data.\n\n_Just type what you want, I'll handle the rest._ 🚀",
-        "ru": "🧠✨ **ИИ-помощник TMulti**\n_Ваш персональный помощник для музыки, видео и многого другого_\n\nГоворите со мной как с другом, а не командами! Вот что я умею:\n\n🎵 **Находить и скачивать музыку**\nСкажите своё настроение или что вы делаете («песня для тренажёрного зала», «грустные песни») и получите отличные предложения — скачайте всё одним нажатием.\n\n📺 **Поиск на YouTube**\nНазовите видео или его тему, и я покажу настоящие результаты для выбора.\n\n🎤 **Текст песни**\nНазовите песню и исполнителя, и я принесу полный текст.\n\n📊 **История загрузок**\nСпросите, что и когда вы скачивали — я возьму это из ваших данных.\n\n_Просто напишите, что хотите, остальное сделаю я._ 🚀",
-        "es": "🧠✨ **Asistente de IA de TMulti**\n_Tu asistente personal para música, video y más_\n\n¡Habla conmigo como con un amigo, no con comandos! Esto es lo que puedo hacer por ti:\n\n🎵 **Descubrir y descargar música**\nDime tu estado de ánimo o qué estás haciendo («una canción para el gimnasio», «canciones tristes») y recibe excelentes sugerencias — descárgalas todas con un toque.\n\n📺 **Búsqueda en YouTube**\nNombra un video o su tema, y te mostraré resultados reales para elegir.\n\n🎤 **Letras**\nNombra la canción y el artista, y te traeré la letra completa.\n\n📊 **Historial de descargas**\nPregunta qué descargaste y cuándo — lo sacaré de tus propios datos.\n\n_Solo escribe lo que quieres, yo me encargo del resto._ 🚀",
+        "fa": "🧠✨ **دستیار هوشمند بات طاها**\n_دستیار شخصی شما برای موزیک، ویدیو و بیشتر_\n\nبا من مثل یک دوست حرف بزن — نه دستور! چیزی که میتونم برات انجام بدم:\n\n🎵 **کشف و دانلود موزیک**\nبگو چه حسی داری یا چیکار میخوای بکنی («آهنگ برای باشگاه»، «آهنگ‌های غمگین») و چند تا پیشنهاد عالی می‌گیری — با یک کلیک همه رو دانلود کن.\n\n📺 **جستجوی یوتیوب**\nاسم ویدیو یا موضوعش رو بگو، نتایج واقعی رو نشونت میدم تا انتخاب کنی.\n\n🎤 **متن آهنگ**\nاسم و خواننده آهنگ رو بگو، متن کاملشو برات میارم.\n\n📊 **سابقه دانلودها**\nبپرس چی دانلود کردی و کِی — از دیتابیس خودت برات میگم.\n\n_فقط بنویس چی میخوای، بقیه‌شو من انجام میدم._ 🚀",
+        "en": "🧠✨ **Taha Bot AI Assistant**\n_Your personal assistant for music, video and more_\n\nTalk to me like a friend, not a command! Here's what I can do for you:\n\n🎵 **Discover & download music**\nTell me your mood or what you're up to (\"a song for the gym\", \"sad songs\") and get great suggestions — download them all with one tap.\n\n📺 **YouTube search**\nName a video or its topic, and I'll show you real results to pick from.\n\n🎤 **Lyrics**\nName the song and artist, and I'll bring you the full lyrics.\n\n📊 **Download history**\nAsk what you downloaded and when — I'll pull it from your own data.\n\n_Just type what you want, I'll handle the rest._ 🚀",
+        "ru": "🧠✨ **ИИ-помощник Taha Bot**\n_Ваш персональный помощник для музыки, видео и многого другого_\n\nГоворите со мной как с другом, а не командами! Вот что я умею:\n\n🎵 **Находить и скачивать музыку**\nСкажите своё настроение или что вы делаете («песня для тренажёрного зала», «грустные песни») и получите отличные предложения — скачайте всё одним нажатием.\n\n📺 **Поиск на YouTube**\nНазовите видео или его тему, и я покажу настоящие результаты для выбора.\n\n🎤 **Текст песни**\nНазовите песню и исполнителя, и я принесу полный текст.\n\n📊 **История загрузок**\nСпросите, что и когда вы скачивали — я возьму это из ваших данных.\n\n_Просто напишите, что хотите, остальное сделаю я._ 🚀",
+        "es": "🧠✨ **Asistente de IA de Taha Bot**\n_Tu asistente personal para música, video y más_\n\n¡Habla conmigo como con un amigo, no con comandos! Esto es lo que puedo hacer por ti:\n\n🎵 **Descubrir y descargar música**\nDime tu estado de ánimo o qué estás haciendo («una canción para el gimnasio», «canciones tristes») y recibe excelentes sugerencias — descárgalas todas con un toque.\n\n📺 **Búsqueda en YouTube**\nNombra un video o su tema, y te mostraré resultados reales para elegir.\n\n🎤 **Letras**\nNombra la canción y el artista, y te traeré la letra completa.\n\n📊 **Historial de descargas**\nPregunta qué descargaste y cuándo — lo sacaré de tus propios datos.\n\n_Solo escribe lo que quieres, yo me encargo del resto._ 🚀",
     },
     "btn_ai_exit": {"fa": "🔙 خروج از چت", "en": "🔙 Exit Chat", "ru": "🔙 Выйти из чата", "es": "🔙 Salir del chat"},
     "ai_group_hint": {
@@ -5680,13 +5881,18 @@ async def download_album(client: Client, chat_id: int, status: Message, album: d
     alb_name = album.get('album') or album.get('name') or ''
     is_real_album = bool(album.get('total_tracks') or album.get('year')) and not album.get('is_playlist')
     collected, skipped = [], []
+    results = [None] * total
+    done = [0]
 
-    for i, trk in enumerate(tracks, 1):
-        name = trk.get('name') or trk.get('title') or ''
+    async def _progress():
         try:
-            await status.edit_text(f"📀 **{alb_name}**\n⏳ ({i}/{total}) {name[:45]}")
+            await status.edit_text(f"📀 **{alb_name}**\n⏳ در حال آماده‌سازی {done[0]} از {total} آهنگ...\n"
+                                   "_همه آهنگ‌ها با هم ارسال می‌شوند._")
         except Exception:
             pass
+
+    async def _one(i, trk):
+        name = trk.get('name') or trk.get('title') or ''
         meta = make_meta(
             "spotify" if not trk.get("deezer_id") else "deezer",
             title=name, artist=trk.get('artists_all') or trk.get('artist') or album.get('artist'),
@@ -5702,12 +5908,25 @@ async def download_album(client: Client, chat_id: int, status: Message, album: d
             if doc_file_id(doc):
                 if doc.pop("_sent_msg", None) is not None:
                     doc["_delivered"] = True  # no cache channel: already in the chat
-                collected.append(doc)
+                results[i - 1] = doc
             else:
-                skipped.append(name)
+                results[i - 1] = name
         except Exception as e:
             print(f"Album track failed ({name}): {e}", flush=True)
-            skipped.append(name)
+            results[i - 1] = name
+        done[0] += 1
+        if done[0] % 2 == 0 or done[0] == total:
+            await _progress()
+
+    # Tracks are prepared in parallel (MUSIC_SEMAPHORE caps real downloads;
+    # cached ones resolve instantly) and delivered together afterwards.
+    await _progress()
+    await asyncio.gather(*(_one(i, trk) for i, trk in enumerate(tracks, 1)))
+    for r in results:
+        if isinstance(r, dict):
+            collected.append(r)
+        elif r:
+            skipped.append(r)
 
     if not collected:
         try:
@@ -6307,6 +6526,10 @@ async def gatekeeper_message(client: Client, message: Message):
         await message.reply_text(t(chat_id, "maintenance_msg"))
         raise StopPropagation
 
+    if not is_approved(uid):
+        await deny_unapproved_message(client, message, uid)
+        raise StopPropagation
+
     missing = await missing_force_channels(client, uid)
     if missing:
         await message.reply_text(t(chat_id, "force_join_msg"), reply_markup=force_join_kb(missing, chat_id))
@@ -6376,6 +6599,8 @@ async def gatekeeper_inline(client: Client, iq: InlineQuery):
         await deny(t(uid, "inline_deny_banned"))
     if get_settings().get("maintenance") and not is_maintenance_allowed(uid):
         await deny(t(uid, "inline_deny_maintenance"))
+    if not is_approved(uid):
+        await deny("🔐 نیاز به تأیید مدیر")
     if uid and await missing_force_channels(client, uid):
         await deny(t(uid, "inline_deny_join"))
 
@@ -6399,6 +6624,11 @@ async def gatekeeper_callback(client: Client, query: CallbackQuery):
 
     if get_settings().get("maintenance") and not is_maintenance_allowed(chat_id or uid):
         await query.answer(t(chat_id or uid, "maintenance_msg"), show_alert=True)
+        raise StopPropagation
+
+    if not is_approved(uid):
+        await query.answer(f"🔐 برای استفاده از ربات باید مدیر دسترسی شما را تأیید کند.\nآیدی شما: {uid}\nبه @{ADMIN_CONTACT} پیام بدهید.",
+                           show_alert=True)
         raise StopPropagation
 
     missing = await missing_force_channels(client, uid)
@@ -7271,21 +7501,18 @@ async def play_playlist(client: Client, chat_id: int, idx: int, shuffle: bool = 
         return await client.send_message(chat_id, t(chat_id, "playlist_ai_no_tracks"))
     if shuffle:
         random.shuffle(tracks)
-    tracks = tracks[:50]
+    tracks = tracks[:35]
     status = await client.send_message(chat_id, t(chat_id, "playlist_sending_all", count=len(tracks)))
+    # Same grouped delivery as albums: everything is prepared first, then sent
+    # together with one numbered picker for each song's tools.
+    items = []
     for tr in tracks:
-        key = tr.get("key")
-        try:
-            ok = await deliver_by_key(client, chat_id, key, track_actions_kb(key, chat_id))
-            if not ok and tr.get("title"):
-                await deliver_track(client, chat_id, make_meta("catalog", title=tr.get("title"), artist=tr.get("artist")))
-        except Exception as e:
-            print(f"playlist play item failed: {e}", flush=True)
-        await asyncio.sleep(0.6)
-    try:
-        await status.delete()
-    except Exception:
-        pass
+        key = str(tr.get("key") or "")
+        items.append({"name": tr.get("title") or "", "artist": tr.get("artist") or "",
+                      "duration": tr.get("duration") or 0,
+                      "yt_id": key if re.fullmatch(r"[0-9A-Za-z_-]{11}", key) else ""})
+    await download_album(client, chat_id, status,
+                         {"album": (doc or {}).get("name") or "Playlist", "is_playlist": True, "tracks": items})
 
 
 # ---------------- 6.7 ADMIN PANEL ----------------
@@ -7332,6 +7559,9 @@ def admin_home_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🎯 مدیریت Smallz", callback_data="adm_smallz_0"),
          InlineKeyboardButton("🛡 دسترسی در تعمیرات", callback_data="adm_maintallow")],
         [InlineKeyboardButton("🚪 معافیت از عضویت اجباری", callback_data="adm_fjallow")],
+        [InlineKeyboardButton("🔐 دسترسی کاربران", callback_data="adm_access"),
+         InlineKeyboardButton("📦 حجم آپلود و امضا", callback_data="adm_limits")],
+        [InlineKeyboardButton("⚙️ پنل پیشرفته (روشن/خاموش قابلیت‌ها)", callback_data="adm_feat")],
         [InlineKeyboardButton(
             "🎵 کش خودکار ۲۴/۷: 🟢 روشن" if harv_on else "🎵 کش خودکار ۲۴/۷: 🔴 خاموش",
             callback_data="adm_harvester")],
@@ -7346,6 +7576,8 @@ async def render_admin_home(msg: Message, edit: bool = True):
     text = ("🛠 **پنل مدیریت**\n\n"
             f"وضعیت ربات: {'🔴 حالت تعمیرات' if get_settings().get('maintenance') else '🟢 فعال'}\n"
             f"کش خودکار ۲۴/۷: {harv_state}\n"
+            f"تأیید دستی کاربران: {'🟢 روشن' if approval_required() else '🔴 خاموش'}\n"
+            f"حداکثر حجم آپلود: {upload_limit_mb()} مگابایت\n"
             "یکی از بخش‌ها را انتخاب کنید:")
     if edit:
         await msg.edit_text(text, reply_markup=admin_home_kb())
@@ -7418,7 +7650,7 @@ async def render_admin_users(msg: Message, page: int = 0, sort: str = "seen"):
         cid = d.get("chat_id")
         name = (d.get("first_name") or "بی‌نام")[:18]
         uname = f"@{d['username']}" if d.get("username") else "—"
-        flag = "⛔️" if d.get("banned") else "✅"
+        flag = "⛔️" if d.get("banned") else ("✅" if d.get("approved") or is_admin(cid) else "⏳")
         lines.append(f"{flag} `{cid}` • {name} • {uname}")
         lines.append(f"      آخرین فعالیت: {fmt_ts(d.get('last_seen'))} • رویداد: {d.get('events', 0)}\n")
         rows.append([InlineKeyboardButton(f"{flag} {name}", callback_data=f"adm_u_{cid}")])
@@ -7458,7 +7690,7 @@ async def render_admin_user(msg: Message, target: int):
     lines = [f"👤 **{(doc.get('first_name') or 'بی‌نام')}**",
              f"آیدی: `{target}`",
              f"یوزرنیم: {'@' + doc['username'] if doc.get('username') else '—'}",
-             f"وضعیت: {'⛔️ مسدود' if banned else '✅ فعال'}",
+             f"وضعیت: {'⛔️ مسدود' if banned else '✅ فعال'} • دسترسی: {'✅ تأیید شده' if doc.get('approved') or is_admin(target) else '⏳ تأیید نشده'}",
              f"عضویت: {fmt_ts(doc.get('joined_at'))} • آخرین فعالیت: {fmt_ts(doc.get('last_seen'))}",
              f"دانلودها: {dls} • رویدادها: {doc.get('events', 0)}\n",
              "**آخرین فعالیت‌ها:**"]
@@ -7469,7 +7701,9 @@ async def render_admin_user(msg: Message, target: int):
 
     rows = [
         [InlineKeyboardButton("✅ رفع مسدودیت" if banned else "⛔️ مسدود کردن",
-                              callback_data=f"adm_{'unban' if banned else 'ban'}_{target}")],
+                              callback_data=f"adm_{'unban' if banned else 'ban'}_{target}"),
+         InlineKeyboardButton("🚫 لغو دسترسی" if doc.get("approved") else "✅ تأیید دسترسی",
+                              callback_data=f"adm_{'revk' if doc.get('approved') else 'appr'}_{target}")],
         [InlineKeyboardButton("✉️ ارسال پیام", callback_data=f"adm_msg_{target}"),
          InlineKeyboardButton("📜 فعالیت کامل", callback_data=f"adm_uact_{target}_0")],
         [InlineKeyboardButton("🔙 کاربران", callback_data=back_target)],
@@ -7850,7 +8084,7 @@ async def start_handler(client: Client, message: Message):
             status = await message.reply_text("⏳ در حال دریافت آثار هنرمند...")
             return await render_ytm_artist(client, chat_id, status, param[5:])
         elif param.startswith("opt_"):
-            # "Go to TMulti" button under a song shared in a group/inline:
+            # "Go to Taha Bot" button under a song shared in a group/inline:
             # resend it here with the full actions keyboard.
             token = param[4:]
             status = await message.reply_text("⏳ در حال دریافت موزیک و گزینه‌ها...")
@@ -8329,7 +8563,7 @@ def _inline_cover_url(meta: dict):
 def _go_to_bot_kb(doc_or_key, bot_username: str):
     key = doc_or_key.get("vid_id") if isinstance(doc_or_key, dict) else str(doc_or_key)
     return InlineKeyboardMarkup([[InlineKeyboardButton(
-        "⚡️ رفتن به تی‌مولتی", url=f"https://ble.ir/{bot_username}?start=opt_{lyrics_token(key)}")]])
+        "⚡️ رفتن به بات طاها", url=f"https://ble.ir/{bot_username}?start=opt_{lyrics_token(key)}")]])
 
 
 async def build_track_inline_result(meta: dict, doc, bot_username: str):
@@ -8472,7 +8706,7 @@ GUIDE_CARDS = [
     ("vid", "🎬 جستجوی ویدیوی یوتیوب", "vid <نام ویدیو>", VID_ICON),
     ("pt", "📌 جستجوی تصاویر پینترست", "pt <موضوع>", PIN_ICON),
     ("px", "🖼 جستجوی تصاویر پکسلز", "px <موضوع>", PIN_ICON),
-    ("ai", "🤖 هوش مصنوعی TMulti", "ai <سوال شما>", AI_ICON),
+    ("ai", "🤖 هوش مصنوعی بات طاها", "ai <سوال شما>", AI_ICON),
 ]
 
 
@@ -8594,7 +8828,7 @@ async def inline_handler(client: Client, iq: InlineQuery):
                         title=pin_title[:100], caption=f"📌 {pin_title[:200]}\n⚡️ @{bot_username}",
                         reply_markup=InlineKeyboardMarkup([[
                             InlineKeyboardButton("⬇️ کیفیت اصلی", url=f"https://ble.ir/{bot_username}?start=pti_{pin_id}"),
-                            InlineKeyboardButton("🔎 ادامه در تی‌مولتی", url=f"https://ble.ir/{bot_username}?start=ptq_{qtok}")]])))
+                            InlineKeyboardButton("🔎 ادامه در بات طاها", url=f"https://ble.ir/{bot_username}?start=ptq_{qtok}")]])))
 
         elif mode == "px":
             if not sub_q:
@@ -8610,7 +8844,7 @@ async def inline_handler(client: Client, iq: InlineQuery):
                         caption=f"📸 {ph.get('photographer', '')}\n⚡️ @{bot_username}",
                         reply_markup=InlineKeyboardMarkup([[
                             InlineKeyboardButton("⬇️ کیفیت اصلی", url=f"https://ble.ir/{bot_username}?start=px_{ph['id']}"),
-                            InlineKeyboardButton("🔎 ادامه در تی‌مولتی", url=f"https://ble.ir/{bot_username}?start=pxq_{qtok}")]])))
+                            InlineKeyboardButton("🔎 ادامه در بات طاها", url=f"https://ble.ir/{bot_username}?start=pxq_{qtok}")]])))
 
         elif mode == "ai":
             if not sub_q:
@@ -8620,7 +8854,7 @@ async def inline_handler(client: Client, iq: InlineQuery):
                 try:
                     res, _ = await asyncio.wait_for(asyncio.to_thread(
                         ai_chat.ask_ai,
-                        "You are TMulti AI assistant. Answer concisely and helpfully in the user's language.",
+                        "You are Taha Bot AI assistant. Answer concisely and helpfully in the user's language.",
                         [{"role": "user", "content": sub_q}], []), timeout=8)
                     content = _clean_str(res.get("content") or "پاسخی دریافت نشد.")[:3000]
                     results.append(InlineQueryResultArticle(
@@ -8645,14 +8879,14 @@ async def inline_handler(client: Client, iq: InlineQuery):
             break
     try:
         await iq.answer(final, cache_time=5, is_personal=False, is_gallery=False,
-                        switch_pm_text="🎵 منوی اصلی ربات TMulti", switch_pm_parameter="start")
+                        switch_pm_text="🎵 منوی اصلی ربات بات طاها", switch_pm_parameter="start")
     except Exception as e:
         print(f"Inline answer error: {e}", flush=True)
         # One bad result must not blank the whole menu: retry with plain cards.
         try:
             safe = [r for r in final if isinstance(r, (InlineQueryResultCachedAudio, InlineQueryResultArticle))]
             await iq.answer(safe, cache_time=5, is_personal=False,
-                            switch_pm_text="🎵 منوی اصلی ربات TMulti", switch_pm_parameter="start")
+                            switch_pm_text="🎵 منوی اصلی ربات بات طاها", switch_pm_parameter="start")
         except Exception:
             pass
 
@@ -9425,21 +9659,23 @@ async def callback_router(client: Client, query: CallbackQuery):
         await render_image_search(msg, query, chat_id, page)
 
     elif data.startswith("img_pick_"):
-        idx = int(data.split("_")[2])
-        items = user_data.get(chat_id, {}).get("img_page_items", [])
-        if idx >= len(items):
+        key = data.split("_", 2)[2]
+        store = user_data.get(chat_id, {})
+        photo = (store.get("img_by_id") or {}).get(key)
+        if photo is None and key.isdigit():
+            items = store.get("img_page_items", [])
+            photo = items[int(key)] if int(key) < len(items) else None
+        if photo is None:
             return await client.send_message(chat_id, t(chat_id, "pt_expired_research"))
-        photo = items[idx]
         status = await client.send_message(chat_id, t(chat_id, "img_fetching_full"))
         try:
-            path = os.path.join(IMAGE_DL_DIR, f"img_{photo['id']}.jpg")
-            await asyncio.to_thread(download_url_to_file_sync, photo["src"]["original"], path)
+            path = await asyncio.to_thread(fetch_full_image_sync, photo)
             await client.send_document(chat_id, document=path, caption=f"📸 {photo.get('photographer','')}",
                                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
                                            "🎨 ابزارهای تصویر", callback_data="menu_image_tools")]]))
             os.remove(path)
             await status.delete()
-            prov = user_data.get(chat_id, {}).get("img_provider") or "pexels"
+            prov = photo.get("_provider") or user_data.get(chat_id, {}).get("img_provider") or "pexels"
             log_activity(chat_id, "image_search", f"{prov}: {photo.get('photographer','')} #{photo['id']}")
             record_image_download(chat_id, prov, photo["src"]["original"], photo.get("photographer", ""))
         except Exception as e:
@@ -9506,7 +9742,9 @@ async def callback_router(client: Client, query: CallbackQuery):
         mus_results = user_data.get(chat_id, {}).get("mus_results", [])
         if idx >= len(mus_results): return await msg.edit_text(t(chat_id, "lib_result_expired"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(chat_id, "btn_back"), callback_data="menu_music")]]))
         sc_id, sc_url = mus_results[idx]
-        await process_sc_download(client, chat_id, msg, sc_url, cache_key=sc_id)
+        meta = make_meta("sc", sc_id=sc_id, sc_url=sc_url)
+        status = await client.send_message(chat_id, t(chat_id, "track_downloading", track="SoundCloud"))
+        await deliver_track(client, chat_id, meta, status=status, activity="music_sc")
 
     elif data == "noop":
         pass  # page indicator button; query.answer() above already ack'd it
@@ -9527,7 +9765,7 @@ async def callback_router(client: Client, query: CallbackQuery):
                 body = body.format(max_subs=MAX_SUBS_PER_USER)
             elif key == "inline":
                 body = body.format(bot_username=os.environ.get("BOT_USERNAME", "tahasbot"))
-            elif key == "playlists":
+            elif key in ("playlists", "lib"):
                 body = body.format(max_playlists=MAX_PLAYLISTS_PER_USER, max_tracks=MAX_TRACKS_PER_PLAYLIST)
             await msg.edit_text(body[:4000], reply_markup=help_keyboard(chat_id, key))
         else:
@@ -9543,6 +9781,8 @@ async def callback_router(client: Client, query: CallbackQuery):
     elif data.startswith("adm_"):
         if not is_admin(query.from_user.id if query.from_user else 0):
             return await query.answer("⛔️", show_alert=True)
+        if await handle_bale_admin_callback(client, query, data):
+            return
 
         if data == "adm_home":
             await render_admin_home(msg)
@@ -9734,8 +9974,10 @@ async def callback_router(client: Client, query: CallbackQuery):
         items = user_data.get(chat_id, {}).get("official_results", [])
         if not items:
             return await msg.reply_text(t(chat_id, "official_results_expired"))
-        pick = random.randrange(len(items))
-        await process_official_download(client, chat_id, msg, items[pick])
+        song = random.choice(items)
+        meta = _official_item_meta(song)
+        status = await client.send_message(chat_id, t(chat_id, "track_downloading", track=_track_label(meta)))
+        await deliver_track(client, chat_id, meta, status=status, activity="music_" + meta.get("source", "yt"))
 
     elif data.startswith("scp_"):
         await render_sc_page(msg, chat_id, page=int(data.split("_", 1)[1]))
@@ -9768,8 +10010,9 @@ async def callback_router(client: Client, query: CallbackQuery):
         if idx >= len(official_results):
             return await msg.edit_text(t(chat_id, "lib_result_expired"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(chat_id, "btn_back"), callback_data="menu_music")]]))
 
-        song_info = official_results[idx]
-        await process_official_download(client, chat_id, msg, song_info)
+        meta = _official_item_meta(official_results[idx])
+        status = await client.send_message(chat_id, t(chat_id, "track_downloading", track=_track_label(meta)))
+        await deliver_track(client, chat_id, meta, status=status, activity="music_" + meta.get("source", "yt"))
 
     # --- VIDEO SELECTIONS ---
     elif data.startswith("page_"):
@@ -10510,7 +10753,7 @@ async def process_video_edit(client: Client, chat_id: int, msg: Message, action:
         cap = f"✅ {label}"
         if send_as == "audio":
             await client.send_audio(chat_id, audio=out, caption=cap, title=t(chat_id, "vedit_audio_title"),
-                                    performer="TMulti")
+                                    performer="Taha Bot")
         elif send_as == "animation":
             await client.send_animation(chat_id, animation=out, caption=cap)
         else:
@@ -10642,6 +10885,8 @@ async def main_text_handler(client: Client, message: Message):
 
     # ---- admin composing flows ----
     if state and is_admin(uid):
+        if await handle_bale_admin_text(client, message, state, text):
+            return
         if state == "ADMIN_BROADCAST":
             user_states.pop(chat_id, None)
             status = await message.reply_text("📢 در حال ارسال...")
@@ -10820,7 +11065,7 @@ async def main_text_handler(client: Client, message: Message):
             await client.send_audio(
                 chat_id, audio=out_file,
                 title=f"{info.get('title','Track')} (Trimmed)",
-                performer=info.get('artist', 'TMulti Audio'), tag_source=src,
+                performer=info.get('artist', 'Taha Bot Audio'), tag_source=src,
                 caption=f"✂️ **برش موزیک ({t_start} تا {t_end})**",
                 reply_markup=track_actions_kb(token or abs(hash(out_file)), chat_id)
             )
@@ -10857,7 +11102,7 @@ async def main_text_handler(client: Client, message: Message):
             await asyncio.to_thread(update_audio_metadata, src, title=title, artist=artist or None)
             await client.send_audio(
                 chat_id, audio=src,
-                title=title, performer=artist or "TMulti Artist", tag_source=src,
+                title=title, performer=artist or "Taha Bot Artist", tag_source=src,
                 caption="🏷 **مشخصات آهنگ به‌روزرسانی شد.**",
                 reply_markup=track_actions_kb(token or abs(hash(src)), chat_id)
             )
@@ -11051,6 +11296,10 @@ async def main_text_handler(client: Client, message: Message):
         return
 
     url_match = re.search(r"(https?://[^\s]+)", text)
+    if not url_match and re.search(r"(?:^|\s)(?:www\.)?(?:instagram\.com|tiktok\.com|vm\.tiktok\.com|youtu\.be|youtube\.com|"
+                                   r"open\.spotify\.com|soundcloud\.com|pinterest\.com|pin\.it|reddit\.com|x\.com|twitter\.com)/\S+", text):
+        text = re.sub(r"(?:^|(?<=\s))((?:www\.)?[\w.-]+\.(?:com|be|it)/\S+)", r"https://\1", text, count=1)
+        url_match = re.search(r"(https?://[^\s]+)", text)
     if not url_match:
         if state == "TIKTOK_TARGET":
             user_states.pop(chat_id, None)
@@ -11068,6 +11317,13 @@ async def main_text_handler(client: Client, message: Message):
 
     url = url_match.group(0)
     user_states.pop(chat_id, None)
+    if re.search(r"(spotify\.link|deezer\.page\.link|on\.soundcloud\.com|vm\.tiktok\.com|vt\.tiktok\.com|/t/|pin\.it|instagram\.com/share/)", url):
+        try:
+            url = await asyncio.to_thread(
+                lambda: requests.get(url, allow_redirects=True, timeout=15,
+                                     headers={"User-Agent": PINTEREST_UA}).url) or url
+        except Exception:
+            pass
 
     if TWITTER_URL_RE.search(url):
         status_msg = await message.reply_text(t(chat_id, "tw_fetching"))
@@ -11093,8 +11349,9 @@ async def main_text_handler(client: Client, message: Message):
     elif "music.youtube.com" in url:
         m = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", url)
         if m:
-            status = await message.reply_text("⏳ در حال دانلود آهنگ از یوتیوب موزیک...")
-            await process_official_download(client, chat_id, status, {"id": m.group(1)})
+            status = await message.reply_text(t(chat_id, "track_downloading", track="YouTube Music"))
+            await deliver_track(client, chat_id, make_meta("yt", yt_id=m.group(1)), status=status,
+                                activity="music_ytm")
             return
 
     elif "youtube.com" in url or "youtu.be" in url:
@@ -11135,6 +11392,11 @@ async def main_text_handler(client: Client, message: Message):
         await process_reddit_link(client, chat_id, status_msg, url)
         return
 
+    else:
+        status_msg = await message.reply_text("🔎 در حال شناسایی لینک...")
+        await process_generic_link(client, chat_id, status_msg, url)
+        return
+
 
 # ---------------- AI CHATBOT (Gemini primary, Groq fallback) ----------------
 import ai_chat
@@ -11145,7 +11407,7 @@ AI_MAX_TURNS = 16         # trim history so token cost/context stays bounded
 
 AI_SYSTEM_PROMPT = (
     "You are an AI assistant embedded inside a Telegram media-downloader bot "
-    "(TMulti). You can search for and download music, search for and download "
+    "(Taha Bot). You can search for and download music, search for and download "
     "YouTube videos, fetch song lyrics, and answer questions about the user's "
     "own download history on this bot. Always reply in the same language the "
     "user writes in -- if they write in Persian/Farsi, reply in Persian, "
@@ -11367,6 +11629,452 @@ async def handle_ai_message(client: Client, chat_id: int, msg: Message, user_tex
                 text = text[:4000] + t(chat_id, "ai_lyrics_truncated_note")
             await client.send_message(chat_id, text, reply_markup=exit_kb)
 
+# ---------------- 9. BALE EXTRAS: access approval, feature switches, limits ----------------
+# Everything the Bale build adds on top of the Telegram bot's admin panel.
+# All checks read in-memory state (refreshed in the background), so none of
+# this adds a database round trip to normal traffic.
+
+ADMIN_CONTACT = os.environ.get("ADMIN_CONTACT", "Tahathegoat").lstrip("@")
+DEFAULT_SIGNATURE = os.environ.get("CAPTION_SIGNATURE", "🤖 @tahasbot")
+
+
+# ---- access approval ----
+_APPROVED = set()
+_APPROVED_TS = [0.0]
+_ACCESS_NOTIFIED = set()
+
+
+def approval_required() -> bool:
+    default = os.environ.get("APPROVAL_REQUIRED_DEFAULT", "true").lower() != "false"
+    return bool(get_settings().get("approval_required", default))
+
+
+def _refresh_approved(force: bool = False):
+    if users_col is None:
+        return
+    if not force and time.time() - _APPROVED_TS[0] < 60:
+        return
+    try:
+        ids = {int(d["chat_id"]) for d in users_col.find({"approved": True}, {"chat_id": 1})}
+        _APPROVED.clear()
+        _APPROVED.update(ids)
+        _APPROVED_TS[0] = time.time()
+    except Exception as e:
+        print(f"approved refresh error: {e}", flush=True)
+
+
+def is_approved(uid) -> bool:
+    if not uid or is_admin(uid) or not approval_required():
+        return True
+    _refresh_approved()
+    return int(uid) in _APPROVED
+
+
+def set_approved(uid: int, approved: bool):
+    uid = int(uid)
+    if users_col is not None:
+        users_col.update_one({"chat_id": uid},
+                             {"$set": {"approved": approved, "approved_at" if approved else "revoked_at": time.time()},
+                              "$setOnInsert": {"joined_at": time.time()}}, upsert=True)
+    (_APPROVED.add if approved else _APPROVED.discard)(uid)
+
+
+def access_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(f"📩 پیام به @{ADMIN_CONTACT}",
+                                                       url=f"https://ble.ir/{ADMIN_CONTACT}")]])
+
+
+def access_text(user, uid) -> str:
+    name = (getattr(user, "first_name", "") or "").strip() or "کاربر"
+    return (f"👋 سلام {name} عزیز، به **بات طاها** خوش آمدید!\n\n"
+            f"🆔 آیدی حساب شما:\n`{uid}`\n\n"
+            "🔐 استفاده از ربات نیاز به تأیید مدیر دارد.\n"
+            f"لطفاً به @{ADMIN_CONTACT} پیام بدهید و آیدی بالا را برایش بفرستید تا دسترسی شما فعال شود.\n\n"
+            "_بعد از تأیید، از طریق همین ربات به شما خبر داده می‌شود._")
+
+
+async def notify_access_request(client: Client, user, uid: int):
+    """One admin ping per user (restart-safe via the users doc)."""
+    if not ADMIN_ID or uid in _ACCESS_NOTIFIED:
+        return
+    _ACCESS_NOTIFIED.add(uid)
+    try:
+        if users_col is not None:
+            res = users_col.update_one({"chat_id": uid, "access_requested_at": {"$exists": False}},
+                                       {"$set": {"access_requested_at": time.time()}})
+            if res.matched_count == 0:
+                return  # already requested before
+        name = (getattr(user, "first_name", "") or "بی‌نام")
+        uname = f"@{user.username}" if getattr(user, "username", None) else "—"
+        await client.send_message(
+            ADMIN_ID,
+            f"🆕 **درخواست دسترسی**\n\n👤 {name}\n🔗 {uname}\n🆔 `{uid}`",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ تأیید", callback_data=f"adm_appr_{uid}"),
+                 InlineKeyboardButton("❌ رد", callback_data=f"adm_rej_{uid}")],
+                [InlineKeyboardButton("👤 جزئیات کاربر", callback_data=f"adm_u_{uid}")]]))
+    except Exception as e:
+        print(f"access notify error: {e}", flush=True)
+
+
+async def deny_unapproved_message(client: Client, message: Message, uid: int):
+    await message.reply_text(access_text(message.from_user, uid), reply_markup=access_kb())
+    await notify_access_request(client, message.from_user, uid)
+
+
+# ---- feature switches (enforced in pyrogram/client.py) ----
+PROTECTED_FEATURES = ("adm", "menu_main", "setlang", "noop", "check_join", "help", "_", "contact_admin",
+                      "cmd:/start", "cmd:/admin", "cmd:/id", "cmd:/menu", "cmd:/help", "cmd:/tahahelp")
+FEATURE_CATS = {
+    "link": ("🔗 لینک‌ها (دانلود از هر سایت)", "link:"),
+    "upload": ("📤 فایل‌های ارسالی کاربر", "upload:"),
+    "cmd": ("⌨️ دستورات", "cmd:"),
+    "inline": ("🔎 جستجوی سریع (دکمه‌های جستجو)", "inline:"),
+    "btn": ("🔘 همه دکمه‌ها", ""),
+}
+CURATED_FEATURES = {
+    "link:youtube": "▶️ لینک یوتیوب", "link:ytmusic": "🎵 لینک یوتیوب موزیک",
+    "link:instagram": "📸 لینک اینستاگرام", "link:tiktok": "📱 لینک تیک‌تاک",
+    "link:spotify": "🟢 لینک اسپاتیفای", "link:soundcloud": "☁️ لینک ساندکلاد",
+    "link:pinterest": "📌 لینک پینترست", "link:reddit": "🔴 لینک ردیت", "link:twitter": "🐦 لینک توییتر/X",
+    "link:deezer": "💿 لینک دیزر", "link:other": "🌐 سایر لینک‌ها",
+    "upload:photo": "🖼 ارسال عکس", "upload:video": "🎬 ارسال ویدیو", "upload:audio": "🎵 ارسال آهنگ",
+    "upload:voice": "🎙 ارسال ویس", "upload:document": "📄 ارسال فایل",
+    "inline:sp": "🔎 جستجوی اسپاتیفای", "inline:sc": "🔎 جستجوی ساندکلاد", "inline:ytm": "🔎 جستجوی یوتیوب موزیک",
+    "inline:alb": "🔎 جستجوی آلبوم", "inline:art": "🔎 جستجوی خواننده", "inline:pl": "🔎 جستجوی پلی‌لیست",
+    "inline:top": "🔥 پرطرفدارهای هفته",
+    "q_1080p": "📺 کیفیت 1080p", "q_720p": "📺 کیفیت 720p", "q_480p": "📺 کیفیت 480p", "q_360p": "📺 کیفیت 360p",
+}
+
+
+class FeatureGate:
+    def __init__(self):
+        self.registry = dict(CURATED_FEATURES)
+        self.disabled = set()
+        self.dirty = False
+
+    def load(self):
+        st = get_settings()
+        reg = st.get("feat_registry") or {}
+        if isinstance(reg, dict):
+            for k, v in reg.items():
+                self.registry.setdefault(k, v)
+        self.disabled = set(st.get("feat_disabled") or [])
+
+    @staticmethod
+    def protected(key: str) -> bool:
+        return any(key == p or key.startswith(p) for p in PROTECTED_FEATURES)
+
+    def is_exempt(self, uid) -> bool:
+        return is_admin(uid)
+
+    def is_disabled(self, key: str) -> bool:
+        return key in self.disabled and not self.protected(key)
+
+    def seen(self, key: str, label: str):
+        if key in self.registry or self.protected(key) or len(self.registry) > 3000:
+            return
+        self.registry[key] = re.sub(r"\s+", " ", str(label or key))[:40]
+        self.dirty = True
+
+    def toggle(self, key: str) -> bool:
+        if key in self.disabled:
+            self.disabled.discard(key)
+        else:
+            self.disabled.add(key)
+        set_setting("feat_disabled", sorted(self.disabled))
+        return key not in self.disabled
+
+    def flush(self):
+        if self.dirty:
+            self.dirty = False
+            set_setting("feat_registry", self.registry)
+
+    def keys_for(self, cat: str):
+        prefix = FEATURE_CATS[cat][1]
+        if cat == "btn":
+            keys = [k for k in self.registry if ":" not in k]
+        else:
+            keys = [k for k in self.registry if k.startswith(prefix)]
+        return sorted(keys, key=lambda k: (self.registry.get(k) or k))
+
+
+FEATURES = FeatureGate()
+
+
+def apply_runtime_settings():
+    """Push admin-panel values into the Bale client (limit, signature, gate)."""
+    global MUSIC_CACHE_CHANNEL
+    st = get_settings()
+    try:
+        mb = int(st.get("upload_limit_mb") or 50)
+    except (TypeError, ValueError):
+        mb = 50
+    bot.upload_limit = max(5, min(50, mb)) * 1024 * 1024
+    bot.caption_signature = (st.get("signature_text") or DEFAULT_SIGNATURE) if st.get("signature_on", True) else ""
+    if not os.environ.get("MUSIC_CACHE_CHANNEL") and st.get("cache_channel"):
+        MUSIC_CACHE_CHANNEL = str(st["cache_channel"])
+    FEATURES.load()
+    bot.feature_gate = FEATURES
+
+
+def upload_limit_mb() -> int:
+    return int(getattr(bot, "upload_limit", 50 * 1024 * 1024) // (1024 * 1024))
+
+
+async def on_channel_seen(chat):
+    """A post (or our admin status) in a channel reveals its numeric id --
+    the only way to learn it, since Bale cannot resolve private invite links.
+    The first such channel becomes the music cache channel."""
+    global MUSIC_CACHE_CHANNEL
+    if bot_chats_col is not None:
+        try:
+            bot_chats_col.update_one({"chat_id": chat.id}, {"$set": {
+                "chat_id": chat.id, "title": chat.title, "type": "channel", "active": True,
+                "updated_at": time.time()}}, upsert=True)
+        except Exception as e:
+            print(f"bot_chats save error: {e}", flush=True)
+    if not MUSIC_CACHE_CHANNEL:
+        MUSIC_CACHE_CHANNEL = str(chat.id)
+        set_setting("cache_channel", chat.id)
+        print(f"🎵 music cache channel set to {chat.id} ({chat.title})", flush=True)
+        if ADMIN_ID:
+            try:
+                await bot.send_message(ADMIN_ID, f"🎵 کانال کش موزیک شناسایی و فعال شد:\n**{chat.title}**\n`{chat.id}`")
+            except Exception:
+                pass
+
+
+async def _bale_background():
+    while True:
+        await asyncio.sleep(120)
+        try:
+            FEATURES.flush()
+            _refresh_approved()
+        except Exception as e:
+            print(f"bale background error: {e}", flush=True)
+
+
+# ---- admin panel pages ----
+async def render_admin_access(msg: Message, page: int = 0, mode: str = "pending"):
+    req = approval_required()
+    q = ({"approved": {"$ne": True}, "banned": {"$ne": True}} if mode == "pending"
+         else {"approved": True})
+    docs, total = [], 0
+    if users_col is not None:
+        try:
+            total = users_col.count_documents(q)
+            docs = list(users_col.find(q).sort("last_seen", -1).skip(page * ADM_PAGE).limit(ADM_PAGE))
+        except Exception as e:
+            print(f"admin access error: {e}", flush=True)
+    pages = max(1, (total + ADM_PAGE - 1) // ADM_PAGE)
+    title = "⏳ در انتظار تأیید" if mode == "pending" else "✅ تأیید شده"
+    lines = ["🔐 **مدیریت دسترسی کاربران**\n",
+             f"تأیید دستی کاربران جدید: {'🟢 روشن' if req else '🔴 خاموش (همه آزادند)'}",
+             f"\n**{title}** — {total} نفر • صفحه {page + 1} از {pages}\n"]
+    rows = [[InlineKeyboardButton("🔴 خاموش کردن تأیید دستی" if req else "🟢 روشن کردن تأیید دستی",
+                                  callback_data="adm_acctoggle")],
+            [InlineKeyboardButton(("• " if mode == "pending" else "") + "⏳ در انتظار", callback_data="adm_acc_pending_0"),
+             InlineKeyboardButton(("• " if mode == "approved" else "") + "✅ تأیید شده", callback_data="adm_acc_approved_0")]]
+    for d in docs:
+        cid = d.get("chat_id")
+        name = (d.get("first_name") or "بی‌نام")[:16]
+        uname = f"@{d['username']}" if d.get("username") else ""
+        lines.append(f"• `{cid}` {name} {uname} — {fmt_ts(d.get('last_seen'))}")
+        if mode == "pending":
+            rows.append([InlineKeyboardButton(f"✅ {name}", callback_data=f"adm_appr_{cid}"),
+                         InlineKeyboardButton("👤", callback_data=f"adm_u_{cid}")])
+        else:
+            rows.append([InlineKeyboardButton(f"🚫 لغو دسترسی {name}", callback_data=f"adm_revk_{cid}"),
+                         InlineKeyboardButton("👤", callback_data=f"adm_u_{cid}")])
+    if not docs:
+        lines.append("_موردی نیست_")
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"adm_acc_{mode}_{page - 1}"))
+    nav.append(InlineKeyboardButton(f"· {page + 1}/{pages} ·", callback_data="noop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"adm_acc_{mode}_{page + 1}"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton("➕ تأیید با آیدی عددی", callback_data="adm_accadd")])
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="adm_home")])
+    await msg.edit_text("\n".join(lines)[:4000], reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def render_admin_limits(msg: Message):
+    mb = upload_limit_mb()
+    st = get_settings()
+    sig_on = st.get("signature_on", True)
+    cache = MUSIC_CACHE_CHANNEL or "— (یک پست در کانال کش بگذارید تا شناسایی شود)"
+    text = ("📦 **محدودیت‌ها و تنظیمات فایل**\n\n"
+            f"حداکثر حجم آپلود: **{mb} مگابایت** (بین ۵ تا ۵۰)\n"
+            "_فایل‌های بزرگ‌تر از این حد تقسیم یا فشرده می‌شوند، یا ارسال نمی‌شوند._\n\n"
+            f"امضای زیر فایل‌ها: {'🟢 ' + (st.get('signature_text') or DEFAULT_SIGNATURE) if sig_on else '🔴 خاموش'}\n"
+            f"کانال کش موزیک: `{cache}`")
+    rows = [
+        [InlineKeyboardButton("➖ ۵", callback_data="adm_lim_-5"), InlineKeyboardButton("➖ ۱", callback_data="adm_lim_-1"),
+         InlineKeyboardButton(f"{mb} MB", callback_data="noop"),
+         InlineKeyboardButton("➕ ۱", callback_data="adm_lim_1"), InlineKeyboardButton("➕ ۵", callback_data="adm_lim_5")],
+        [InlineKeyboardButton("۵", callback_data="adm_limset_5"), InlineKeyboardButton("۱۰", callback_data="adm_limset_10"),
+         InlineKeyboardButton("۲۰", callback_data="adm_limset_20"), InlineKeyboardButton("۵۰", callback_data="adm_limset_50")],
+        [InlineKeyboardButton("✍️ امضا: خاموش کن" if sig_on else "✍️ امضا: روشن کن", callback_data="adm_sigtoggle"),
+         InlineKeyboardButton("📝 متن امضا", callback_data="adm_sigtext")],
+        [InlineKeyboardButton("♻️ تشخیص دوباره کانال کش", callback_data="adm_cachereset")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="adm_home")],
+    ]
+    await msg.edit_text(text, reply_markup=InlineKeyboardMarkup(rows))
+
+
+FEAT_PAGE = 8
+
+
+async def render_admin_features(msg: Message, cat: str = "", page: int = 0):
+    if not cat:
+        FEATURES.flush()
+        off = len(FEATURES.disabled)
+        text = ("⚙️ **پنل پیشرفته — روشن/خاموش کردن قابلیت‌ها**\n\n"
+                "هر قابلیت، لینک، دستور، نوع فایل و حتی تک‌تک دکمه‌های ربات (مثل کیفیت 1080p) اینجا قابل خاموش شدن است.\n"
+                "دکمه‌های خاموش برای کاربران نمایش داده نمی‌شوند و استفاده از آن‌ها مسدود می‌شود. "
+                "شما به‌عنوان مدیر همه چیز را می‌بینید.\n\n"
+                "_دکمه‌ها با اولین نمایش در ربات به این فهرست اضافه می‌شوند._\n\n"
+                f"قابلیت‌های خاموش: **{off}**")
+        rows = [[InlineKeyboardButton(f"{label} ({len(FEATURES.keys_for(c))})", callback_data=f"adm_feat_{c}_0")]
+                for c, (label, _) in FEATURE_CATS.items()]
+        if off:
+            rows.append([InlineKeyboardButton("🟢 روشن کردن همه", callback_data="adm_featall")])
+        rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="adm_home")])
+        return await msg.edit_text(text, reply_markup=InlineKeyboardMarkup(rows))
+    keys = FEATURES.keys_for(cat)
+    pages = max(1, (len(keys) + FEAT_PAGE - 1) // FEAT_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = keys[page * FEAT_PAGE:(page + 1) * FEAT_PAGE]
+    # callback_data stays short: index into a per-admin list
+    store = user_data.setdefault(msg.chat.id, {})
+    store["feat_keys"] = chunk
+    store["feat_view"] = (cat, page)
+    rows = []
+    for i, k in enumerate(chunk):
+        on = k not in FEATURES.disabled
+        label = FEATURES.registry.get(k) or k
+        shown = label if cat != "btn" else f"{label} · {k}"
+        rows.append([InlineKeyboardButton(f"{'🟢' if on else '🔴'} {shown}"[:60], callback_data=f"adm_ft_{i}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"adm_feat_{cat}_{page - 1}"))
+    nav.append(InlineKeyboardButton(f"· {page + 1}/{pages} ·", callback_data="noop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"adm_feat_{cat}_{page + 1}"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton("🔙 دسته‌ها", callback_data="adm_feat")])
+    text = (f"⚙️ **{FEATURE_CATS[cat][0]}**\n\nروی هر مورد بزنید تا روشن/خاموش شود.\n"
+            f"🟢 روشن • 🔴 خاموش — صفحه {page + 1} از {pages}")
+    await msg.edit_text(text, reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def handle_bale_admin_callback(client: Client, query: CallbackQuery, data: str) -> bool:
+    """Admin callbacks added by the Bale build. Returns True when handled."""
+    msg = query.message
+    chat_id = msg.chat.id
+    if data == "adm_access" or data.startswith("adm_acc_"):
+        mode, page = "pending", 0
+        if data.startswith("adm_acc_"):
+            _, _, mode, pg = data.split("_", 3)
+            page = int(pg)
+        await render_admin_access(msg, page, mode)
+    elif data == "adm_acctoggle":
+        set_setting("approval_required", not approval_required())
+        await render_admin_access(msg)
+    elif data == "adm_accadd":
+        user_states[chat_id] = "ADMIN_APPROVE_ID"
+        await msg.edit_text("➕ آیدی عددی کاربر (یا چند آیدی با فاصله) را بفرستید تا دسترسی‌اش فعال شود:",
+                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 انصراف", callback_data="adm_access")]]))
+    elif data.startswith(("adm_appr_", "adm_rej_", "adm_revk_")):
+        target = int(data.rsplit("_", 1)[1])
+        approve = data.startswith("adm_appr_")
+        set_approved(target, approve)
+        await query.answer("✅ دسترسی فعال شد" if approve else "🚫 دسترسی غیرفعال شد", show_alert=False)
+        try:
+            await client.send_message(
+                target, "✅ دسترسی شما به **بات طاها** فعال شد! برای شروع /start را بزنید." if approve
+                else "⛔️ درخواست/دسترسی شما به ربات توسط مدیر غیرفعال شد.")
+        except Exception:
+            pass
+        if msg.text and "درخواست دسترسی" in msg.text:
+            await msg.edit_text(msg.text + ("\n\n✅ تأیید شد" if approve else "\n\n❌ رد شد"))
+        elif data.startswith("adm_revk_"):
+            await render_admin_access(msg, 0, "approved")
+        else:
+            await render_admin_user(msg, target)
+    elif data == "adm_limits":
+        await render_admin_limits(msg)
+    elif data.startswith("adm_lim_") or data.startswith("adm_limset_"):
+        val = int(data.rsplit("_", 1)[1])
+        mb = val if data.startswith("adm_limset_") else upload_limit_mb() + val
+        mb = max(5, min(50, mb))
+        set_setting("upload_limit_mb", mb)
+        apply_runtime_settings()
+        await render_admin_limits(msg)
+    elif data == "adm_sigtoggle":
+        set_setting("signature_on", not get_settings().get("signature_on", True))
+        apply_runtime_settings()
+        await render_admin_limits(msg)
+    elif data == "adm_sigtext":
+        user_states[chat_id] = "ADMIN_SIGTEXT"
+        await msg.edit_text("📝 متن امضای زیر فایل‌ها را بفرستید (مثلاً `🤖 @tahasbot`):",
+                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 انصراف", callback_data="adm_limits")]]))
+    elif data == "adm_cachereset":
+        global MUSIC_CACHE_CHANNEL
+        MUSIC_CACHE_CHANNEL = os.environ.get("MUSIC_CACHE_CHANNEL", "")
+        set_setting("cache_channel", None)
+        await query.answer("یک پست جدید در کانال کش بگذارید تا شناسایی شود.", show_alert=True)
+        await render_admin_limits(msg)
+    elif data == "adm_feat":
+        await render_admin_features(msg)
+    elif data.startswith("adm_feat_"):
+        _, _, cat, pg = data.split("_", 3)
+        await render_admin_features(msg, cat, int(pg))
+    elif data.startswith("adm_ft_"):
+        keys = user_data.get(chat_id, {}).get("feat_keys") or []
+        i = int(data.rsplit("_", 1)[1])
+        if i < len(keys):
+            on = FEATURES.toggle(keys[i])
+            await query.answer("🟢 روشن شد" if on else "🔴 خاموش شد", show_alert=False)
+        cat, page = user_data.get(chat_id, {}).get("feat_view", ("btn", 0))
+        await render_admin_features(msg, cat, page)
+    elif data == "adm_featall":
+        FEATURES.disabled.clear()
+        set_setting("feat_disabled", [])
+        await render_admin_features(msg)
+    else:
+        return False
+    return True
+
+
+async def handle_bale_admin_text(client: Client, message: Message, state: str, text: str) -> bool:
+    chat_id = message.chat.id
+    if state == "ADMIN_APPROVE_ID":
+        user_states.pop(chat_id, None)
+        ids = [int(x) for x in re.findall(r"\d{4,}", text)]
+        for uid in ids:
+            set_approved(uid, True)
+            try:
+                await client.send_message(uid, "✅ دسترسی شما به **بات طاها** فعال شد! برای شروع /start را بزنید.")
+            except Exception:
+                pass
+        await message.reply_text(f"✅ دسترسی {len(ids)} کاربر فعال شد." if ids else "❌ آیدی معتبری پیدا نشد.",
+                                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔐 دسترسی‌ها", callback_data="adm_access")]]))
+        return True
+    if state == "ADMIN_SIGTEXT":
+        user_states.pop(chat_id, None)
+        set_setting("signature_text", text.strip()[:60])
+        set_setting("signature_on", True)
+        apply_runtime_settings()
+        await message.reply_text("✅ امضا ذخیره شد.",
+                                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📦 تنظیمات فایل", callback_data="adm_limits")]]))
+        return True
+    return False
+
+
 async def _keep_render_awake():
     """Render's free tier sleeps after 15 minutes without inbound HTTP traffic,
     and long-polling Bale is outbound only. Hitting our own public URL goes
@@ -11391,6 +12099,10 @@ async def _run_bot():
     await bot.start()
     print("🤖 Bot started", flush=True)
     register_bot_commands()
+    apply_runtime_settings()
+    bot.on_channel_seen = on_channel_seen
+    _refresh_approved(force=True)
+    asyncio.create_task(_bale_background())
     asyncio.create_task(_keep_render_awake())
     # Two instances sharing one database would both poll subscriptions and send
     # weekly mixtapes, so users would get everything twice. Exactly one deploy

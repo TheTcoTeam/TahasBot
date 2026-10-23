@@ -43,6 +43,15 @@ on:
         required: false
         type: string
 
+      UPLOAD_LIMIT_MB:
+        description: 'Bale upload limit set in the admin panel'
+        required: false
+        type: string
+      SIGNATURE:
+        description: 'Caption signature'
+        required: false
+        type: string
+
 jobs:
   edit:
     runs-on: ubuntu-latest
@@ -91,4 +100,6 @@ jobs:
           REPLY_MARKUP: ${{ inputs.REPLY_MARKUP }}
           FONT_LATIN: /home/runner/.fonts/NotoSans-Regular.ttf
           FONT_ARABIC: /home/runner/.fonts/NotoNaskhArabic-Regular.ttf
+          UPLOAD_LIMIT_MB: ${{ inputs.UPLOAD_LIMIT_MB }}
+          SIGNATURE: ${{ inputs.SIGNATURE }}
         run: python media_worker.py
