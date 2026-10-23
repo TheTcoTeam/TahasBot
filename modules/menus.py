@@ -272,11 +272,11 @@ def get_rega_search_selector(query: str, chat_id=None, get_lang_fn=None) -> Inli
     if lang == "fa":
         return InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("🟢 اسپاتیفای", switch_inline_query_current_chat=f"sp: {query}"),
-                InlineKeyboardButton("☁️ ساندکلاد", switch_inline_query_current_chat=f"sc: {query}")
+                InlineKeyboardButton("🟢 اسپاتیفای", callback_data="cardsrch_sp"),
+                InlineKeyboardButton("☁️ ساندکلاد", callback_data="cardsrch_sc")
             ],
             [
-                InlineKeyboardButton("🔴 یوتیوب موزیک", switch_inline_query_current_chat=f"ytm: {query}"),
+                InlineKeyboardButton("🔴 یوتیوب موزیک", callback_data="cardsrch_ytm"),
                 InlineKeyboardButton("📀 جستجوی آلبوم", switch_inline_query_current_chat=f"alb: {query}")
             ],
             [
@@ -291,11 +291,11 @@ def get_rega_search_selector(query: str, chat_id=None, get_lang_fn=None) -> Inli
     else:
         return InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("🟢 Spotify", switch_inline_query_current_chat=f"sp: {query}"),
-                InlineKeyboardButton("☁️ SoundCloud", switch_inline_query_current_chat=f"sc: {query}")
+                InlineKeyboardButton("🟢 Spotify", callback_data="cardsrch_sp"),
+                InlineKeyboardButton("☁️ SoundCloud", callback_data="cardsrch_sc")
             ],
             [
-                InlineKeyboardButton("🔴 YouTube Music", switch_inline_query_current_chat=f"ytm: {query}"),
+                InlineKeyboardButton("🔴 YouTube Music", callback_data="cardsrch_ytm"),
                 InlineKeyboardButton("📀 Albums", switch_inline_query_current_chat=f"alb: {query}")
             ],
             [

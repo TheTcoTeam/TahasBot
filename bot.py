@@ -9824,6 +9824,16 @@ async def callback_router(client: Client, query: CallbackQuery):
     elif data == "noop":
         pass  # page indicator button; query.answer() above already ack'd it
 
+    elif data.startswith("cardsrch_"):
+        # Search card buttons: the same in-chat, paged and sortable results
+        # view for every source (Spotify / YouTube Music / SoundCloud).
+        q = user_data.get(chat_id, {}).get("card_query") or ""
+        if not q:
+            return await query.answer(t(chat_id, "generic_expired"), show_alert=True)
+        renderer = {"sp": render_spotify_search, "sc": render_sc_search, "ytm": render_ytm_search}[data.split("_", 1)[1]]
+        status = await client.send_message(chat_id, t(chat_id, "searching_text"))
+        await renderer(status, q, chat_id)
+
     elif data == "check_join":
         missing = await missing_force_channels(client, query.from_user.id if query.from_user else chat_id)
         if missing:
@@ -11384,6 +11394,7 @@ async def main_text_handler(client: Client, message: Message):
             await message.reply_text(t(chat_id, "ig_invalid_link"))
         elif not state and message.chat.type == ChatType.PRIVATE:
             # RegaSpotify instant search card ONLY for private chat!
+            user_data.setdefault(chat_id, {})["card_query"] = text
             await message.reply_text(
                 f"🎵 **{text}**\n\nبرای جستجو، یکی از بخش‌های زیر را انتخاب کنید:",
                 reply_markup=get_rega_search_selector(text, chat_id, get_lang)
