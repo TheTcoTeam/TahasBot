@@ -1,0 +1,74 @@
+name: Media Tools Worker
+
+# ffmpeg video edits (trim, rotate, crop, speed, reverse, GIF, watermark, ...).
+# bot.py builds the ffmpeg arguments; media_worker.py runs them on the clip
+# fetched from Bale and sends the result back.
+on:
+  workflow_dispatch:
+    inputs:
+      FILE_ID:
+        description: 'Bale file_id of the source video'
+        required: true
+        type: string
+      ARGS:
+        description: 'JSON list of ffmpeg args with {SRC}/{OUT}/{FONT_*} placeholders'
+        required: true
+        type: string
+      OUT_EXT:
+        description: 'Output extension'
+        required: false
+        type: string
+      SEND_AS:
+        description: 'video | audio | animation'
+        required: false
+        type: string
+      CHAT_ID:
+        description: 'Bale chat id'
+        required: true
+        type: string
+      MESSAGE_ID:
+        description: 'Status message to replace'
+        required: false
+        type: string
+      CAPTION:
+        description: 'Caption for the result'
+        required: false
+        type: string
+      AUDIO_TITLE:
+        description: 'Title when sending audio'
+        required: false
+        type: string
+      REPLY_MARKUP:
+        description: 'JSON inline keyboard for the result'
+        required: false
+        type: string
+
+jobs:
+  edit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg and fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-noto-core
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run media worker
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          FILE_ID: ${{ inputs.FILE_ID }}
+          ARGS: ${{ inputs.ARGS }}
+          OUT_EXT: ${{ inputs.OUT_EXT }}
+          SEND_AS: ${{ inputs.SEND_AS }}
+          CHAT_ID: ${{ inputs.CHAT_ID }}
+          MESSAGE_ID: ${{ inputs.MESSAGE_ID }}
+          CAPTION: ${{ inputs.CAPTION }}
+          AUDIO_TITLE: ${{ inputs.AUDIO_TITLE }}
+          REPLY_MARKUP: ${{ inputs.REPLY_MARKUP }}
+        run: python media_worker.py

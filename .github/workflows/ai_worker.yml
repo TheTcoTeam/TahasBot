@@ -1,0 +1,101 @@
+name: AI Media Worker
+
+# Heavy AI jobs that a 0.1-CPU Render instance cannot run: Whisper transcription
+# and Demucs stem separation. GitHub's runners give several free cores per job.
+on:
+  workflow_dispatch:
+    inputs:
+      TASK:
+        description: 'subs | karaoke'
+        required: true
+        type: string
+      SOURCE_URL:
+        description: 'Media URL to process'
+        required: true
+        type: string
+      CHAT_ID:
+        description: 'Bale chat to deliver to'
+        required: true
+        type: string
+      MESSAGE_ID:
+        description: 'Status message to edit'
+        required: false
+        type: string
+      TARGET_LANG:
+        description: 'Subtitle language (default fa)'
+        required: false
+        type: string
+      DRY_RUN:
+        description: 'true = process but skip Bale delivery (for testing)'
+        required: false
+        type: string
+
+jobs:
+  ai_job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      pot-provider:
+        image: brainicism/bgutil-ytdlp-pot-provider:latest
+        ports:
+          - 4416:4416
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install FFmpeg and Persian-capable fonts
+        run: |
+          sudo apt-get update
+          # fonts-noto-core supplies Arabic/Persian glyphs; without it burned-in
+          # Persian subtitles render as empty boxes.
+          sudo apt-get install -y ffmpeg fonts-noto-core
+
+      - name: Install base dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install requests urllib3 cffi curl-cffi mutagen pillow deno yt-dlp-ejs bgutil-ytdlp-pot-provider
+          pip install -U "yt-dlp[default] @ https://github.com/yt-dlp/yt-dlp/archive/master.zip"
+
+      # Installed per-task: torch is ~800MB and only karaoke needs it.
+      - name: Install Whisper stack
+        if: ${{ inputs.TASK == 'subs' }}
+        run: pip install faster-whisper deep-translator
+
+      - name: Install Demucs stack
+        if: ${{ inputs.TASK == 'karaoke' }}
+        run: |
+          # numpy/soundfile FIRST from PyPI: the pytorch index below replaces the
+          # default index, so anything resolved during that step cannot reach
+          # PyPI and demucs ends up importing a missing numpy.
+          pip install numpy soundfile
+          pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install demucs
+          python -c "import numpy, torch, demucs; print('demucs stack OK', numpy.__version__, torch.__version__)"
+
+      - name: Create cookies file
+        env:
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+          IG_COOKIES: ${{ secrets.IG_COOKIES }}
+        run: |
+          if [ -n "$YOUTUBE_COOKIES" ]; then echo "$YOUTUBE_COOKIES" > cookies.txt; fi
+          if [ -n "$IG_COOKIES" ]; then echo "$IG_COOKIES" >> cookies.txt; fi
+          [ -f cookies.txt ] && sed -i 's/\n/
+/g; s///g' cookies.txt || true
+
+      - name: Run AI worker
+        env:
+          TASK: ${{ github.event.inputs.TASK }}
+          SOURCE_URL: ${{ github.event.inputs.SOURCE_URL }}
+          CHAT_ID: ${{ github.event.inputs.CHAT_ID }}
+          MESSAGE_ID: ${{ github.event.inputs.MESSAGE_ID }}
+          TARGET_LANG: ${{ github.event.inputs.TARGET_LANG }}
+          DRY_RUN: ${{ github.event.inputs.DRY_RUN }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          POT_PROVIDER_URL: http://127.0.0.1:4416
+        run: python ai_worker.py

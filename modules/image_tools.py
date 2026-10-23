@@ -138,15 +138,23 @@ def apply_image_filter(input_path: str, filter_type: str) -> str:
     return out_path
 
 
+_REMBG_SESSION = None
+
+
 def remove_image_background(input_path: str) -> str:
     """Remove background and create transparent PNG."""
     out_path = os.path.join(IMAGE_TOOLS_DIR, f"nobg_{int(time.time())}.png")
 
     try:
         import rembg
+        global _REMBG_SESSION
+        if _REMBG_SESSION is None:
+            # u2netp: 4.7 MB model, ~150 MB RAM -- the default u2net (176 MB,
+            # ~1 GB RAM) does not fit next to Whisper/Demucs on a 2 GB box.
+            _REMBG_SESSION = rembg.new_session("u2netp")
         with open(input_path, "rb") as inp_f:
             input_bytes = inp_f.read()
-        output_bytes = rembg.remove(input_bytes)
+        output_bytes = rembg.remove(input_bytes, session=_REMBG_SESSION)
         with open(out_path, "wb") as out_f:
             out_f.write(output_bytes)
         return out_path

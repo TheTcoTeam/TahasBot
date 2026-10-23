@@ -48,8 +48,8 @@ AUDIO_FILTERS = {
         "suffix": "_bass"
     },
     "vocal": {
-        "label_fa": "🎙 حذف صدای خواننده (کارائوکه)",
-        "label_en": "🎙 Vocal Remover (Karaoke)",
+        "label_fa": "🎙 کارائوکه",
+        "label_en": "🎙 Karaoke",
         "filter": "pan=stereo|c0=c0-c1|c1=c1-c0",
         "suffix": "_instrumental"
     }
@@ -90,7 +90,7 @@ def process_audio_filter(input_path: str, effect_code: str) -> str:
     output_path = os.path.join(MUSIC_TOOLS_DIR, out_filename)
 
     cmd = [
-        "ffmpeg", "-y", "-i", input_path,
+        "ffmpeg", "-y", "-i", input_path, "-vn",
         "-af", conf["filter"],
         "-c:a", "libmp3lame", "-b:a", "320k",
         output_path
@@ -109,7 +109,7 @@ def change_audio_speed(input_path: str, speed_factor: float) -> str:
     output_path = os.path.join(MUSIC_TOOLS_DIR, out_filename)
 
     cmd = [
-        "ffmpeg", "-y", "-i", input_path,
+        "ffmpeg", "-y", "-i", input_path, "-vn",
         "-filter:a", f"atempo={speed_factor}",
         "-c:a", "libmp3lame", "-b:a", "320k",
         output_path
@@ -129,7 +129,7 @@ def trim_audio_file(input_path: str, start_sec: str, end_sec: str) -> str:
 
     cmd = [
         "ffmpeg", "-y", "-ss", str(start_sec), "-to", str(end_sec),
-        "-i", input_path,
+        "-i", input_path, "-vn",
         "-c:a", "libmp3lame", "-b:a", "320k",
         output_path
     ]
@@ -147,7 +147,7 @@ def convert_audio_format(input_path: str, target_fmt: str) -> str:
     out_filename = f"{Path(input_path).stem}_{int(time.time())}.{target_fmt}"
     output_path = os.path.join(MUSIC_TOOLS_DIR, out_filename)
 
-    cmd = ["ffmpeg", "-y", "-i", input_path]
+    cmd = ["ffmpeg", "-y", "-i", input_path, "-vn"]
     if target_fmt == "mp3":
         cmd.extend(["-c:a", "libmp3lame", "-b:a", "320k"])
     elif target_fmt == "flac":

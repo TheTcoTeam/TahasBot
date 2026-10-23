@@ -1,0 +1,116 @@
+name: Video Downloader Worker
+on:
+  workflow_dispatch:
+    inputs:
+      YT_URL:
+        description: 'Media URL'
+        required: true
+        type: string
+      PLATFORM:
+        description: 'Target Platform'
+        required: true
+        type: string
+      CHAT_ID:
+        description: 'Chat ID'
+        required: true
+        type: string
+      MESSAGE_ID:
+        description: 'Message ID to edit'
+        required: true
+        type: string
+      YT_QUALITY:
+        description: 'Target Quality'
+        required: false
+        type: string
+      YT_FORMAT:
+        description: 'Format'
+        required: false
+        type: string
+      GET_SUBS:
+        description: 'Embed Subtitles'
+        required: false
+        type: string
+      GET_COMMENTS:
+        description: 'Download Comments'
+        required: false
+        type: string
+      GET_DESC:
+        description: 'Download Description'
+        required: false
+        type: string
+      GET_THUMBNAIL:
+        description: 'Download Thumbnail'
+        required: false
+        type: string
+      TRIM_START:
+        description: 'Start time for trimming'
+        required: false
+        type: string
+      TRIM_END:
+        description: 'End time for trimming'
+        required: false
+        type: string
+
+jobs:
+  download_and_send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # YouTube PO-token helper: lets yt-dlp pass YouTube's bot check from a datacenter IP.
+    services:
+      pot-provider:
+        image: brainicism/bgutil-ytdlp-pot-provider:latest
+        ports:
+          - 4416:4416
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python & Cache
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          # curl-cffi for Chrome impersonation; uploads go through the repo's
+          # Bale client (pyrogram/ in this repo), so real Pyrogram is not installed.
+          pip install requests urllib3 cffi curl-cffi mutagen pillow deno yt-dlp-ejs bgutil-ytdlp-pot-provider
+          pip install -U "yt-dlp[default] @ https://github.com/yt-dlp/yt-dlp/archive/master.zip"
+
+      - name: Create cookies file
+        env:
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+          IG_COOKIES: ${{ secrets.IG_COOKIES }}
+        run: |
+          if [ -n "$YOUTUBE_COOKIES" ]; then
+            echo "$YOUTUBE_COOKIES" > cookies.txt
+          fi
+          if [ -n "$IG_COOKIES" ]; then
+            echo "$IG_COOKIES" >> cookies.txt
+          fi
+          sed -i 's/\n/
+/g; s///g' cookies.txt 2>/dev/null || true
+
+      - name: Run Bot Script
+        env:
+          YT_URL: ${{ github.event.inputs.YT_URL }}
+          PLATFORM: ${{ github.event.inputs.PLATFORM }}
+          YT_FORMAT: ${{ github.event.inputs.YT_FORMAT }}
+          YT_QUALITY: ${{ github.event.inputs.YT_QUALITY }}
+          CHAT_ID: ${{ github.event.inputs.CHAT_ID }}
+          MESSAGE_ID: ${{ github.event.inputs.MESSAGE_ID }}
+          GET_SUBS: ${{ github.event.inputs.GET_SUBS }}
+          GET_COMMENTS: ${{ github.event.inputs.GET_COMMENTS }}
+          GET_DESC: ${{ github.event.inputs.GET_DESC }}
+          GET_THUMBNAIL: ${{ github.event.inputs.GET_THUMBNAIL }}
+          TRIM_START: ${{ github.event.inputs.TRIM_START }}
+          TRIM_END: ${{ github.event.inputs.TRIM_END }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          BOT_USERNAME: ${{ vars.BOT_USERNAME || 'tahasbot' }}
+          POT_PROVIDER_URL: http://127.0.0.1:4416
+        run: python worker.py

@@ -1,22 +1,21 @@
-name: TahasBot 24/7 Keep-Alive
+name: Keep Render awake
 
+# Render's free web services sleep after 15 idle minutes. The bot also pings
+# itself; this is a second, independent wake-up in case the instance did sleep.
 on:
   schedule:
-    # Run every 10 minutes to prevent Render free service from idling/sleeping
     - cron: '*/10 * * * *'
   workflow_dispatch:
 
 jobs:
   ping:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: Ping TahasBot Health Endpoint
+      - name: Ping the bot
         run: |
-          echo "Pinging TahasBot on Render to keep alive..."
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://tahasbot.onrender.com/health)
-          echo "Response HTTP Status: $STATUS"
-          if [ "$STATUS" -ne 200 ]; then
-            echo "Service may be waking up, retrying in 5 seconds..."
-            sleep 5
-            curl -s https://tahasbot.onrender.com/health
-          fi
+          for i in 1 2 3; do
+            curl -fsS -m 90 "${{ vars.RENDER_URL || 'https://tahasbot.onrender.com' }}/" && exit 0
+            sleep 20
+          done
+          exit 0

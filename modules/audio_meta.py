@@ -48,15 +48,19 @@ def safe_filename(artist: str, title: str, ext: str = ".mp3") -> str:
     artist, title = _clean(artist), _clean(title)
     base = f"{artist} - {title}" if artist and title else (title or artist or "track")
     base = re.sub(r'[\\/:*?"<>|]', "", base).strip(" .")
-    if len(base) > 60 and artist and title:
+    if len(base) > 54 and artist and title:
         # Telegram rewrites long names to Underscore_Case: keep the main
         # artist only, drop "(feat. ...)" style tails, then cut at a word.
         main = re.split(r",|&| feat\.| ft\.", artist, maxsplit=1)[0].strip()
         base = re.sub(r'[\\/:*?"<>|]', "", f"{main} - {title}").strip(" .")
-    if len(base) > 60:
-        base = re.sub(r"\s*[\(\[][^\)\]]*[\)\]]", "", base).strip() or base
-        if len(base) > 60:
-            base = base[:60].rsplit(" ", 1)[0]
+    if len(base) > 54:
+        trimmed = base
+        for _ in range(3):  # nested "(... (...))" tails
+            trimmed = re.sub(r"\s*[\(\[][^\(\)\[\]]*[\)\]]", "", trimmed)
+        trimmed = re.sub(r"[\(\)\[\]]", "", trimmed).strip()
+        base = trimmed or base
+        if len(base) > 54:
+            base = base[:54].rsplit(" ", 1)[0]
     base = base.strip(" .-,") or "track"
     if not ext.startswith("."):
         ext = "." + ext
