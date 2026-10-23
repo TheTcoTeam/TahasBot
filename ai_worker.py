@@ -312,7 +312,7 @@ def task_subs():
         files = [final, srt]
     except Exception as e:
         # Still deliver the .srt: it is the valuable part.
-        log(f"burn-in failed ({e}); sending the video and subtitle file separately")
+        log(f"burn-in failed ({e}) stderr={getattr(e, 'stderr', '')[-600:]!r}; sending the video and subtitle file separately")
         files = [video, srt]
 
     asyncio.run(upload(files, f"📝 زیرنویس ({TARGET_LANG}) • {len(cues)} خط"))
