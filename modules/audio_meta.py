@@ -247,14 +247,21 @@ def write_tags(path: str, title: str = "", artist: str = "", album: str = "", ye
     return False
 
 
-def to_mp3(src: str, dst: str, bitrate: str = "320k") -> str:
+# YouTube/SoundCloud sources top out around 128-160 kbps, so 192k MP3 is
+# transparent; with LAME's faster search (compression_level 7) encoding is
+# ~3x quicker than 320k on Render's 0.1 CPU, and uploads are smaller.
+MP3_BITRATE = os.environ.get("MP3_BITRATE", "192k")
+
+
+def to_mp3(src: str, dst: str, bitrate: str = None) -> str:
     """Re-encode to MP3 (ID3 is what every player understands). Returns dst."""
     if src.lower().endswith(".mp3"):
         if src != dst:
             shutil.move(src, dst)
         return dst
     subprocess.run([FFMPEG or "ffmpeg", "-y", "-loglevel", "error", "-i", src, "-vn", "-map", "0:a:0",
-                    "-c:a", "libmp3lame", "-b:a", bitrate, "-map_metadata", "-1", dst],
+                    "-c:a", "libmp3lame", "-b:a", bitrate or MP3_BITRATE, "-compression_level", "7",
+                    "-map_metadata", "-1", dst],
                    check=True, capture_output=True, timeout=600)
     try:
         os.remove(src)

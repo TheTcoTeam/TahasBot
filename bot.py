@@ -193,7 +193,7 @@ def selftest():
                "pinterest_search_sync", "reddit_resolve_post_sync", "reddit_search_sync", "twitter_fetch_sync",
                "pexels_search_sync", "lrclib_lookup", "enrich_meta_sync", "resolve_youtube_id_sync",
                "selftest_music_timing", "download_url_to_file_sync", "instagram_embed_sync", "download_generic_sync",
-               "wikimedia_search_sync", "fetch_full_image_sync"}
+               "wikimedia_search_sync", "fetch_full_image_sync", "instagram_embed_probe"}
     if fn_name not in allowed:
         return jsonify({"error": "fn not allowed", "allowed": sorted(allowed)}), 400
     args = json.loads(request.args.get("args", "[]"))
@@ -3404,8 +3404,8 @@ def selftest_music_timing(yt_id: str = "JGwWNGJdvx8") -> dict:
     raw, _ = download_source_audio_sync(meta)
     out["download"] = round(time.time() - t0, 1)
     t1 = time.time()
-    mp3 = to_mp3(raw, f"music_downloads/timing_{int(t1)}.mp3", "320k") if not raw.endswith(".mp3") else raw
-    out["mp3_320k_encode"] = round(time.time() - t1, 1)
+    mp3 = to_mp3(raw, f"music_downloads/timing_{int(t1)}.mp3") if not raw.endswith(".mp3") else raw
+    out["mp3_encode"] = round(time.time() - t1, 1)
     for p in (raw, mp3):
         try:
             os.remove(p)
@@ -3749,6 +3749,18 @@ def instagram_embed_sync(url: str) -> dict:
         except Exception as e:
             print(f"instagram embed media fetch failed: {e}", flush=True)
     return {"files": files, "caption": caption[:3900]}
+
+
+def instagram_embed_probe(url: str) -> dict:
+    """Diagnostics for /_selftest: what the embed page looks like from here."""
+    m = re.search(r"instagram\.com/(?:[\w.]+/)?(?:p|reel|reels|tv)/([\w-]+)", url)
+    r = requests.get(f"https://www.instagram.com/p/{m.group(1)}/embed/captioned/",
+                     headers={"User-Agent": _IG_UA, "Accept-Language": "en-US,en;q=0.9"}, timeout=25)
+    h = _ig_unescape(r.text)
+    return {"status": r.status_code, "len": len(r.text), "final_url": r.url[:120],
+            "video_url": h.count('"video_url"'), "display_url": h.count('"display_url"'),
+            "EmbeddedMediaImage": r.text.count("EmbeddedMediaImage"), "login": "login" in r.url,
+            "snippet": re.sub(r"\s+", " ", r.text[:300])}
 
 
 def download_instagram_native_sync(url: str):
