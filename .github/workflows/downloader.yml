@@ -71,8 +71,20 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
+      # Static ffmpeg build: apt mirrors on the runners sometimes hang for 20+ min.
       - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        uses: FedericoCarboni/setup-ffmpeg@v3
+        with:
+          ffmpeg-version: release
+
+      - name: Install fonts (Persian/Arabic + Latin)
+        timeout-minutes: 4
+        run: |
+          mkdir -p ~/.fonts
+          base=https://github.com/notofonts/notofonts.github.io/raw/main/fonts
+          curl -fsSL -o ~/.fonts/NotoNaskhArabic-Regular.ttf $base/NotoNaskhArabic/hinted/ttf/NotoNaskhArabic-Regular.ttf || true
+          curl -fsSL -o ~/.fonts/NotoSans-Regular.ttf $base/NotoSans/hinted/ttf/NotoSans-Regular.ttf || true
+          fc-cache -f ~/.fonts || true
 
       - name: Install dependencies
         run: |
