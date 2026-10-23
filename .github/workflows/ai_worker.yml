@@ -85,8 +85,7 @@ jobs:
         run: |
           if [ -n "$YOUTUBE_COOKIES" ]; then echo "$YOUTUBE_COOKIES" > cookies.txt; fi
           if [ -n "$IG_COOKIES" ]; then echo "$IG_COOKIES" >> cookies.txt; fi
-          [ -f cookies.txt ] && sed -i 's/\n/
-/g; s///g' cookies.txt || true
+          [ -f cookies.txt ] && perl -pi -e 's/\\n/\n/g; s/\r//g' cookies.txt || true
 
       - name: Run AI worker
         env:

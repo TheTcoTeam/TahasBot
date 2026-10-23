@@ -93,8 +93,7 @@ jobs:
           if [ -n "$IG_COOKIES" ]; then
             echo "$IG_COOKIES" >> cookies.txt
           fi
-          sed -i 's/\n/
-/g; s///g' cookies.txt 2>/dev/null || true
+          [ -f cookies.txt ] && perl -pi -e 's/\\n/\n/g; s/\r//g' cookies.txt || true
 
       - name: Run Bot Script
         env:
