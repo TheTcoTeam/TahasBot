@@ -1,0 +1,30 @@
+name: Diagnostics
+
+# Manual check of which platforms the runner's IP can reach.
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      pot-provider:
+        image: brainicism/bgutil-ytdlp-pot-provider:latest
+        ports:
+          - 4416:4416
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: pip install -r requirements.txt
+      - name: Cookies
+        env:
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+          IG_COOKIES: ${{ secrets.IG_COOKIES }}
+        run: |
+          printf '%s\n' "$YOUTUBE_COOKIES" > cookies.txt
+          printf '%s\n' "$IG_COOKIES" > ig_cookies.txt
+      - run: python tests/diag_remote.py
