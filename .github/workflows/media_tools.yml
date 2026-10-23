@@ -56,10 +56,10 @@ jobs:
         timeout-minutes: 8
         run: |
           get() { curl -fsSL -m 180 -o /tmp/ff.tar.xz "$1" && mkdir -p /tmp/ff && tar -xJf /tmp/ff.tar.xz -C /tmp/ff --strip-components=1; }
-          if get https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz; then
-            sudo cp /tmp/ff/ffmpeg /tmp/ff/ffprobe /usr/local/bin/
-          elif get https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz; then
+          if get https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz; then
             sudo cp /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/
+          elif get https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz; then
+            sudo cp /tmp/ff/ffmpeg /tmp/ff/ffprobe /usr/local/bin/
           else
             sudo apt-get update && sudo apt-get install -y ffmpeg
           fi
