@@ -134,9 +134,16 @@ def srt_timestamp(seconds: float) -> str:
 
 
 def write_srt(cues, path):
+    # A blank line inside a cue ends it early and corrupts the file for
+    # ffmpeg/libass; translated text sometimes carries them.
     with open(path, "w", encoding="utf-8") as fh:
-        for i, (start, end, text) in enumerate(cues, 1):
-            fh.write(f"{i}\n{srt_timestamp(start)} --> {srt_timestamp(end)}\n{text}\n\n")
+        n = 0
+        for start, end, text in cues:
+            text = "\n".join(l.strip() for l in str(text or "").splitlines() if l.strip())
+            if not text:
+                continue
+            n += 1
+            fh.write(f"{n}\n{srt_timestamp(start)} --> {srt_timestamp(end)}\n{text}\n\n")
     return path
 
 
@@ -223,8 +230,18 @@ def burn_subtitles(video_path, srt_path):
     style = f"FontName={font},FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H90000000,BorderStyle=3"
     fonts_dir = os.environ.get("FONTS_DIR") or os.path.expanduser("~/.fonts")
     fonts_opt = f":fontsdir='{fonts_dir}'" if os.path.isdir(fonts_dir) else ""
+    # Convert with the srt demuxer forced: probing a translated (RTL) file can
+    # fail with "Unable to open" inside the subtitles filter.
+    ass_path = f"{WORK}/subtitles.ass"
+    try:
+        run(["ffmpeg", "-y", "-loglevel", "error", "-sub_charenc", "UTF-8", "-f", "srt",
+             "-i", srt_path, ass_path])
+        sub_filter = f"subtitles='{ass_path}'{fonts_opt}:force_style='{style}'"
+    except Exception as e:
+        log(f"srt->ass failed ({e}); using the srt directly")
+        sub_filter = f"subtitles='{srt_escaped}'{fonts_opt}:charenc=UTF-8:force_style='{style}'"
     run(["ffmpeg", "-y", "-loglevel", "error", "-i", video_path,
-         "-vf", f"subtitles='{srt_escaped}'{fonts_opt}:force_style='{style}'",
+         "-vf", sub_filter,
          "-c:a", "copy", "-preset", "veryfast", out])
     return out
 
