@@ -177,6 +177,51 @@ app = Flask(__name__)
 def health_check():
     return "Bot is alive and running!", 200
 
+@app.route('/_selftest')
+def selftest():
+    """Runs one downloader/search in place on this host and reports what it
+    produced, without sending anything to Bale. Locked behind SELFTEST_KEY;
+    disabled when that is unset."""
+    from flask import request, jsonify
+    key = os.environ.get("SELFTEST_KEY", "")
+    if not key or request.args.get("key") != key:
+        return "not found", 404
+    fn_name = request.args.get("fn", "")
+    allowed = {"download_instagram_native_sync", "download_tiktok_native_sync", "download_source_audio_sync",
+               "spotify_search_tracks_sync", "ytm_search_sync", "sc_search_sync", "pinterest_pin_media_sync",
+               "pinterest_search_sync", "reddit_resolve_post_sync", "reddit_search_sync", "twitter_fetch_sync",
+               "pexels_search_sync", "lrclib_lookup", "enrich_meta_sync", "resolve_youtube_id_sync"}
+    if fn_name not in allowed:
+        return jsonify({"error": "fn not allowed", "allowed": sorted(allowed)}), 400
+    args = json.loads(request.args.get("args", "[]"))
+    if fn_name in ("download_source_audio_sync", "enrich_meta_sync", "resolve_youtube_id_sync"):
+        args = [make_meta(**args[0])]
+    t0 = time.time()
+    try:
+        res = globals()[fn_name](*args)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"[:1500],
+                        "trace": traceback.format_exc()[-1500:], "sec": round(time.time() - t0, 1)})
+    found = []
+
+    def walk(v):
+        if isinstance(v, str) and os.path.isfile(v):
+            found.append({"path": v, "bytes": os.path.getsize(v)})
+            try:
+                os.remove(v)
+            except OSError:
+                pass
+        elif isinstance(v, dict):
+            for x in v.values():
+                walk(x)
+        elif isinstance(v, (list, tuple)):
+            for x in v:
+                walk(x)
+    walk(res)
+    return jsonify({"ok": True, "sec": round(time.time() - t0, 1), "files": found,
+                    "result": repr(res)[:1500]})
+
+
 def run_flask():
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), use_reloader=False)
 
