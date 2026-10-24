@@ -600,7 +600,11 @@ async def send_cached_doc(client: Client, chat_id: int, doc: dict, reply_markup=
             print(f"archive copy failed for {doc.get('vid_id')}: {e}; trying file_id", flush=True)
     if fid:
         try:
-            await client.send_audio(chat_id, audio=fid, caption=caption, reply_markup=reply_markup)
+            # pass the names again: Bale does not reliably carry them over on
+            # a file_id resend
+            await client.send_audio(chat_id, audio=fid, caption=caption, reply_markup=reply_markup,
+                                    title=(doc.get("title") or None), performer=(doc.get("artist") or None),
+                                    duration=int(doc.get("duration") or 0))
             return True
         except Exception as e:
             print(f"cached file_id failed ({e}); trying archive channel", flush=True)
@@ -3503,13 +3507,13 @@ def _cache_caption(meta: dict) -> str:
     return "\n".join(lines)[:1000]
 
 
-async def obtain_track(meta: dict, upload_chat=None) -> dict:
+async def obtain_track(meta: dict, upload_chat=None, force: bool = False) -> dict:
     """Return a current-format cache doc for meta, downloading it if needed.
 
     Concurrent requests for the same song share one download. upload_chat is
     only used when no cache channel is configured.
     """
-    doc = await asyncio.to_thread(cache_find, meta)
+    doc = None if force else await asyncio.to_thread(cache_find, meta)
     if doc:
         return doc
     lock_key = (meta.get("yt_id") or meta.get("sc_id") or meta.get("spotify_id") or meta.get("deezer_id")
@@ -3517,7 +3521,7 @@ async def obtain_track(meta: dict, upload_chat=None) -> dict:
     lock = _TRACK_LOCKS.setdefault(lock_key, asyncio.Lock())
     try:
         async with lock:
-            doc = await asyncio.to_thread(cache_find, meta)
+            doc = None if force else await asyncio.to_thread(cache_find, meta)
             if doc:
                 return doc
             raw = mp3 = thumb = None
@@ -3525,7 +3529,7 @@ async def obtain_track(meta: dict, upload_chat=None) -> dict:
                 async with MUSIC_SEMAPHORE:
                     if meta.get("source") != "sc" and not meta.get("yt_id"):
                         meta["yt_id"] = await asyncio.to_thread(resolve_youtube_id_sync, meta) or ""
-                        if meta["yt_id"]:
+                        if meta["yt_id"] and not force:
                             hit = await asyncio.to_thread(cache_find, {"yt_id": meta["yt_id"]})
                             if hit:
                                 await asyncio.to_thread(_add_aliases, hit, meta)
@@ -3659,9 +3663,15 @@ async def deliver_track(client: Client, chat_id: int, meta: dict, status=None,
 
     label = _track_label(meta) or "..."
     status = await _show_status(client, chat_id, status, t(chat_id, "track_downloading", track=label))
+    carded = bool(doc)  # the cached branch above already showed the card
+    if not doc and _cover_url(meta):
+        # cover card first, so it sits above the song even when the upload
+        # itself lands straight in this chat
+        await send_cover_card(client, chat_id, meta)
+        carded = True
     try:
-        doc = await obtain_track(meta, upload_chat=chat_id)
-        if doc and not doc.get("_sent_msg"):
+        doc = await obtain_track(meta, upload_chat=chat_id, force=bool(doc))
+        if doc and not doc.get("_sent_msg") and not carded:
             await send_cover_card(client, chat_id, meta, doc)
         sent_here = doc.pop("_sent_msg", None) if isinstance(doc, dict) else None
         if sent_here is not None:
@@ -6018,7 +6028,9 @@ async def download_album(client: Client, chat_id: int, status: Message, album: d
     for batch_start in range(0, len(pending), 10):
         batch = pending[batch_start:batch_start + 10]
         try:
-            await client.send_media_group(chat_id, [InputMediaAudio(doc_file_id(d)) for d in batch])
+            await client.send_media_group(chat_id, [
+                InputMediaAudio(doc_file_id(d), title=d.get("title") or None, performer=d.get("artist") or None,
+                                duration=int(d.get("duration") or 0)) for d in batch])
         except Exception as e:
             print(f"Album media-group send failed, sending one by one: {e}", flush=True)
             for d in batch:
@@ -6591,6 +6603,20 @@ async def gatekeeper_message(client: Client, message: Message):
         log_activity(chat_id, "link" if "http" in text.lower() else "search", text)
 
     if is_admin(uid):
+        fwd = getattr(message, "forward_from_chat", None)
+        if fwd is not None and fwd.type == ChatType.CHANNEL and fwd.id:
+            await set_cache_channel(fwd)
+            await message.reply_text(f"🎵 کانال کش موزیک ثبت شد:\n**{fwd.title or ''}**\n`{fwd.id}`")
+            raise StopPropagation
+        m_sc = re.match(r"^/setcache\s+(-?\d+)", text)
+        if m_sc:
+            try:
+                ch = await client.get_chat(int(m_sc.group(1)))
+                await set_cache_channel(ch)
+                await message.reply_text(f"🎵 کانال کش موزیک ثبت شد: **{ch.title or ''}** `{ch.id}`")
+            except Exception as e:
+                await message.reply_text(f"❌ این کانال در دسترس ربات نیست: {e}")
+            raise StopPropagation
         return  # owner bypasses every gate
 
     if is_banned(chat_id):
@@ -9824,6 +9850,18 @@ async def callback_router(client: Client, query: CallbackQuery):
     elif data == "noop":
         pass  # page indicator button; query.answer() above already ack'd it
 
+    elif data.startswith("collp_"):
+        _, pg, srt = data.split("_", 2)
+        await render_coll_search(msg, None, chat_id, (user_data.get(chat_id, {}).get("coll") or {}).get("mode", "alb"),
+                                 int(pg), srt)
+
+    elif data.startswith("collpick_"):
+        ordered = (user_data.get(chat_id, {}).get("coll") or {}).get("ordered") or []
+        i = int(data.split("_", 1)[1])
+        if i >= len(ordered):
+            return await query.answer(t(chat_id, "generic_expired"), show_alert=True)
+        await open_collection_item(client, chat_id, *ordered[i]["act"])
+
     elif data.startswith("cardsrch_"):
         # Search card buttons: the same in-chat, paged and sortable results
         # view for every source (Spotify / YouTube Music / SoundCloud).
@@ -11218,6 +11256,10 @@ async def main_text_handler(client: Client, message: Message):
             await status.edit_text(f"❌ خطا: {e}")
         return
 
+    if state and state.startswith("QSEARCH:"):
+        user_states.pop(chat_id, None)
+        return await run_quick_search(client, chat_id, state.split(":", 1)[1], text)
+
     if state == "MUSIC_SEARCH_SC":
         user_states.pop(chat_id, None)
         status_msg = await message.reply_text(t(chat_id, "searching_text"))
@@ -11908,6 +11950,13 @@ def upload_limit_mb() -> int:
     return int(getattr(bot, "upload_limit", 50 * 1024 * 1024) // (1024 * 1024))
 
 
+async def set_cache_channel(chat):
+    global MUSIC_CACHE_CHANNEL
+    MUSIC_CACHE_CHANNEL = str(chat.id)
+    set_setting("cache_channel", chat.id)
+    print(f"🎵 music cache channel set to {chat.id} ({getattr(chat, 'title', '')})", flush=True)
+
+
 async def on_channel_seen(chat):
     """A post (or our admin status) in a channel reveals its numeric id --
     the only way to learn it, since Bale cannot resolve private invite links.
@@ -12166,6 +12215,196 @@ async def handle_bale_admin_text(client: Client, message: Message, state: str, t
     return False
 
 
+
+# ---------------- 9b. IN-CHAT SEARCH FOR EVERY SEARCH BUTTON ----------------
+# Bale has no inline mode. Every "search" button of the old inline UI (sp:,
+# sc:, ytm:, alb:, art:, pl:, ytm_alb:, top:...) lands here and opens the same
+# paged, sortable results view the Spotify search uses; picks go through the
+# normal pipeline (status message -> cover card -> song with its own menu).
+
+COLL_PAGE = 5
+COLL_LABELS = {
+    "alb": "📀 آلبوم‌ها", "art": "👤 خواننده‌ها", "pl": "📁 پلی‌لیست‌ها",
+    "ytm_alb": "📀 آلبوم‌های یوتیوب موزیک", "ytm_art": "👤 خواننده‌های یوتیوب موزیک",
+    "ytm_pl": "📁 پلی‌لیست‌های یوتیوب موزیک",
+}
+COLL_SORTS = {"r": "🔥 مرتبط", "n": "🔢 بیشترین", "a": "🔤 الفبا", "y": "🆕 جدیدترین"}
+QSEARCH_PROMPTS = {
+    "sp": "🟢 نام آهنگ را برای جستجو در اسپاتیفای بفرستید:",
+    "sc": "☁️ نام آهنگ را برای جستجو در ساندکلاد بفرستید:",
+    "ytm": "🔴 نام آهنگ را برای جستجو در یوتیوب موزیک بفرستید:",
+    "alb": "📀 نام آلبوم را بفرستید:", "art": "👤 نام خواننده را بفرستید:", "pl": "📁 نام پلی‌لیست را بفرستید:",
+    "ytm_alb": "📀 نام آلبوم را بفرستید (یوتیوب موزیک):", "ytm_art": "👤 نام خواننده را بفرستید (یوتیوب موزیک):",
+    "ytm_pl": "📁 نام پلی‌لیست را بفرستید (یوتیوب موزیک):",
+    "vid": "🎬 نام ویدیو را برای جستجو در یوتیوب بفرستید:", "pt": "📌 کلیدواژه پینترست را بفرستید:",
+    "px": "🖼 کلیدواژه عکس را بفرستید:", "general": "🔎 نام آهنگ را بفرستید:",
+}
+
+
+def _coll_items_sync(mode: str, q: str) -> list:
+    out = []
+    if mode == "alb":
+        for a in rega_music.search_albums(q, 30):
+            out.append({"title": a.get("title") or "", "sub": a.get("artist") or "", "n": int(a.get("nb_tracks") or 0),
+                        "year": str(a.get("year") or a.get("release_date") or "")[:4], "act": ("al", str(a["id"]))})
+    elif mode == "art":
+        for a in rega_music.search_artists(q, 30):
+            out.append({"title": a.get("name") or "", "sub": f"{int(a.get('fans') or 0):,} fans", "n": int(a.get("fans") or 0),
+                        "year": "", "act": ("ar", str(a["id"]))})
+    elif mode == "pl":
+        for p_ in rega_music.search_playlists(q, 30):
+            out.append({"title": p_.get("title") or "", "sub": p_.get("user") or "", "n": int(p_.get("nb_tracks") or 0),
+                        "year": "", "act": ("dzpl", str(p_["id"]))})
+    else:
+        kind = {"ytm_alb": "albums", "ytm_art": "artists", "ytm_pl": "playlists"}[mode]
+        for r in ytm_search_sync(q, kind, 30):
+            bid = r.get("browseId") or ""
+            if not bid:
+                continue
+            if kind == "albums":
+                artists = ", ".join(a.get("name", "") for a in (r.get("artists") or []))
+                out.append({"title": r.get("title") or "", "sub": artists, "n": 0, "year": str(r.get("year") or ""),
+                            "act": ("ytal", bid)})
+            elif kind == "artists":
+                out.append({"title": r.get("artist") or "", "sub": "Artist", "n": 0, "year": "", "act": ("ytar", bid)})
+            else:
+                pid = bid[2:] if bid.startswith("VL") else bid
+                out.append({"title": r.get("title") or "", "sub": r.get("author") or "", "n": 0, "year": "",
+                            "act": ("ytpl", pid)})
+    for i, it in enumerate(out):
+        it["rank"] = i
+    return out
+
+
+async def render_coll_search(msg: Message, query: str, chat_id: int, mode: str, page: int = 0, sort: str = "r"):
+    store = user_data.setdefault(chat_id, {})
+    back = InlineKeyboardMarkup([[InlineKeyboardButton(t(chat_id, "btn_back"), callback_data="menu_music")]])
+    if query is not None:
+        try:
+            items = await asyncio.to_thread(_coll_items_sync, mode, query)
+        except Exception as e:
+            print(f"collection search error ({mode}): {e}", flush=True)
+            return await msg.edit_text("❌ خطا در جستجو. دوباره امتحان کنید.", reply_markup=back)
+        store["coll"] = {"mode": mode, "q": query, "items": items}
+    st = store.get("coll") or {}
+    items, mode, q = st.get("items") or [], st.get("mode", mode), st.get("q", "")
+    if not items:
+        return await msg.edit_text("❌ نتیجه‌ای پیدا نشد.", reply_markup=back)
+    sort = sort if sort in COLL_SORTS else "r"
+    key = {"r": lambda x: x["rank"], "n": lambda x: -x["n"], "a": lambda x: x["title"].lower(),
+           "y": lambda x: -(int(x["year"]) if str(x["year"]).isdigit() else 0)}[sort]
+    ordered = sorted(items, key=key)
+    st["ordered"] = ordered
+    pages = max(1, (len(ordered) + COLL_PAGE - 1) // COLL_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = ordered[page * COLL_PAGE:(page + 1) * COLL_PAGE]
+    lines = [f"{COLL_LABELS.get(mode, '🔎')} برای: `{q[:48]}`",
+             f"_{COLL_SORTS[sort]} • {len(ordered)} نتیجه • صفحه {page + 1} از {pages}_\n"]
+    nums = []
+    for i, it in enumerate(chunk):
+        gi = page * COLL_PAGE + i
+        badge = MEDALS[gi] if (sort == "r" and gi < 3) else f"`{gi + 1}`"
+        lines.append(f"{badge} **{it['title'][:45]}**")
+        bits = [b for b in (f"👤 {it['sub'][:30]}" if it["sub"] else "", f"🎵 {it['n']}" if it["n"] and mode != "art" else "",
+                            f"🗓 {it['year']}" if it["year"] else "") if b]
+        if bits:
+            lines.append("      " + " ▫️ ".join(bits) + "\n")
+        nums.append(InlineKeyboardButton(str(gi + 1), callback_data=f"collpick_{gi}"))
+    rows = [nums,
+            [InlineKeyboardButton(f"‹{lbl}›" if k == sort else lbl, callback_data=f"collp_0_{k}") for k, lbl in COLL_SORTS.items()]]
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(t(chat_id, "btn_prev"), callback_data=f"collp_{page - 1}_{sort}"))
+    nav.append(InlineKeyboardButton(f"· {page + 1}/{pages} ·", callback_data="noop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(t(chat_id, "btn_next"), callback_data=f"collp_{page + 1}_{sort}"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton(t(chat_id, "btn_back"), callback_data="menu_music")])
+    await msg.edit_text("\n".join(lines)[:4000], reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def open_collection_item(client: Client, chat_id: int, kind: str, ident: str):
+    if kind == "al":
+        status = await client.send_message(chat_id, "⏳ در حال دریافت مشخصات آلبوم...")
+        return await process_deezer_album(client, chat_id, status, ident)
+    if kind == "ar":
+        status = await client.send_message(chat_id, "⏳ در حال دریافت آثار هنرمند...")
+        return await process_deezer_artist(client, chat_id, status, ident)
+    if kind == "dzpl":
+        status = await client.send_message(chat_id, "⏳ در حال پردازش پلی‌لیست...")
+        return await render_collection(client, chat_id, status, "dzp", ident)
+    if kind == "ytal":
+        status = await client.send_message(chat_id, "⏳ در حال دریافت مشخصات آلبوم...")
+        return await render_collection(client, chat_id, status, "yta", ident)
+    if kind == "ytpl":
+        status = await client.send_message(chat_id, "⏳ در حال پردازش پلی‌لیست...")
+        return await render_collection(client, chat_id, status, "ytp", ident)
+    if kind == "ytar":
+        status = await client.send_message(chat_id, "⏳ در حال دریافت آثار هنرمند...")
+        return await render_ytm_artist(client, chat_id, status, ident)
+
+
+async def render_top_tracks(msg: Message, chat_id: int):
+    try:
+        tracks = await asyncio.to_thread(rega_music.get_chart_tracks, 30)
+    except Exception as e:
+        print(f"chart error: {e}", flush=True)
+        tracks = []
+    items = []
+    for i, tr in enumerate(tracks):
+        m = meta_from_deezer(tr)
+        items.append({"id": m.get("deezer_id"), "title": m["title"] or "Unknown", "artist": m["artist"] or "",
+                      "album": m.get("album") or "", "duration": m["duration"], "dur_str": fmt_dur(m["duration"]),
+                      "views_str": "", "views": 0, "cover": m.get("cover"), "score": 1000 - i, "meta": m})
+    store = user_data.setdefault(chat_id, {})
+    store["official_all"] = items
+    store["last_music_query"] = "🔥 پرطرفدارترین‌های هفته"
+    if not items:
+        return await msg.edit_text("❌ چارت در دسترس نیست.")
+    await render_official_page(msg, chat_id, page=0)
+
+
+async def run_quick_search(client: Client, chat_id: int, mode: str, query: str):
+    """Run one search mode in the chat (shared by buttons and typed queries)."""
+    status = await client.send_message(chat_id, t(chat_id, "searching_text"))
+    if mode in ("sp", "general"):
+        return await render_spotify_search(status, query, chat_id)
+    if mode == "sc":
+        return await render_sc_search(status, query, chat_id)
+    if mode == "ytm":
+        return await render_ytm_search(status, query, chat_id)
+    if mode in COLL_LABELS:
+        return await render_coll_search(status, query, chat_id, mode)
+    if mode == "top":
+        return await render_top_tracks(status, chat_id)
+    if mode == "vid":
+        return await render_video_search(status, query, chat_id)
+    if mode == "pt":
+        return await render_pinterest_search(status, query, chat_id)
+    if mode == "px":
+        return await render_image_search(status, query, chat_id, provider="pexels")
+    return await render_spotify_search(status, query, chat_id)
+
+
+async def quick_search_button(client: Client, user, chat, q: str):
+    """Hook for the Bale client: a former switch-inline button was pressed."""
+    mode, sub = parse_inline_query_prefix(q)
+    chat_id = chat.id
+    if mode == "top":
+        return await run_quick_search(client, chat_id, "top", "")
+    if mode == "guide":
+        mode = "general"
+    if mode == "ai":
+        user_states[chat_id] = "AI_CHAT"
+        return await client.send_message(chat_id, t(chat_id, "ai_intro_text"))
+    if sub:
+        return await run_quick_search(client, chat_id, mode, sub)
+    user_states[chat_id] = f"QSEARCH:{mode}"
+    await client.send_message(chat_id, QSEARCH_PROMPTS.get(mode, QSEARCH_PROMPTS["general"]),
+                              reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(chat_id, "btn_back"),
+                                                                                       callback_data="menu_music")]]))
+
+
 async def _keep_render_awake():
     """Render's free tier sleeps after 15 minutes without inbound HTTP traffic,
     and long-polling Bale is outbound only. Hitting our own public URL goes
@@ -12192,6 +12431,7 @@ async def _run_bot():
     register_bot_commands()
     apply_runtime_settings()
     bot.on_channel_seen = on_channel_seen
+    bot.inline_button_hook = quick_search_button
     _refresh_approved(force=True)
     asyncio.create_task(_bale_background())
     asyncio.create_task(_keep_render_awake())

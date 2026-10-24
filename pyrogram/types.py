@@ -415,7 +415,8 @@ class Message(Object):
             via_bot=User._parse(d.get("via_bot")),
             media_group_id=d.get("media_group_id"),
             forward_from=User._parse(d.get("forward_from")),
-            forward_from_chat=Chat._parse(d.get("forward_from_chat"), client),
+            forward_from_chat=Chat._parse(d.get("forward_from_chat") or (d.get("forward_origin") or {}).get("chat")
+                                          or (d.get("forward_origin") or {}).get("sender_chat"), client),
             entities=d.get("entities"),
             new_chat_members=[User._parse(u) for u in d.get("new_chat_members") or []] or None,
             left_chat_member=User._parse(d.get("left_chat_member")),

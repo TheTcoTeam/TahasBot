@@ -861,6 +861,11 @@ class Client:
                 val = self._file_arg(m.media, field, files)
                 item = {"type": m.TYPE if m.TYPE != "animation" else "video",
                         "media": f"attach://{field}" if val is None else val}
+                if m.TYPE == "audio":
+                    for k in ("title", "performer", "duration"):
+                        v = getattr(m, k, None)
+                        if v:
+                            item[k] = v
                 cap = self._signed(m.caption) if i == 0 else m.caption
                 if cap:
                     item["caption"] = format_text(cap, m.parse_mode)[:MAX_CAPTION]
@@ -1036,7 +1041,11 @@ class Client:
         chat = cq.message.chat if cq.message else Chat(uid)
         if data.startswith("_iq:"):
             await cq.answer()
-            await self._start_inline(cq.from_user, chat, data[4:])
+            hook = getattr(self, "inline_button_hook", None)
+            if hook is not None:
+                await hook(self, cq.from_user, chat, data[4:])
+            else:
+                await self._start_inline(cq.from_user, chat, data[4:])
             return True
         if data == "_iqx":
             self._inline_pending.pop(uid, None)
